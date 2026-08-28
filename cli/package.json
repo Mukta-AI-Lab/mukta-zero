@@ -1,0 +1,31 @@
+{
+  "name": "@mukta/mz-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone CLI to run Mukta Zero agents as a Mukta user (\"mao local / cerebro nuvem\"). User-JWT only, never service-role.",
+  "type": "module",
+  "bin": {
+    "mz": "src/index.mjs"
+  },
+  "main": "src/index.mjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "e2e": "node test/e2e.mjs",
+    "e2e:review": "node test/e2e-review.mjs",
+    "e2e:agent": "node test/e2e-agent.mjs",
+    "build:gate": "node scripts/build-gate.mjs",
+    "e2e:cli": "node test/e2e-cli.mjs",
+    "tui:check": "node test/tui-check.mjs",
+    "tui:frames": "node test/tui-frames.mjs",
+    "tui:login": "node test/tui-login-live.mjs",
+    "intent": "node test/intent-check.mjs",
+    "history": "node test/history-check.mjs",
+    "telemetry": "node test/telemetry-privacy-check.mjs",
+    "extracao": "node test/extracao-check.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}

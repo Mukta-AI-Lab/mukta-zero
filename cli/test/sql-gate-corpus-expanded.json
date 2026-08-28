@@ -1,0 +1,712 @@
+[
+  {
+    "name": "WHERE simples com bind — sql tagged, 1 interpolacao SEGURA",
+    "code": "const user = await sql`SELECT id, email FROM users WHERE id = ${userId}`;",
+    "expect_flag": false
+  },
+  {
+    "name": "LIKE com valor montado em JS mas passado como bind unico — SEGURO",
+    "code": "const term = search.trim();\nconst rows = await sql`SELECT id, name FROM products WHERE name ILIKE ${'%' + term + '%'} ORDER BY name`;",
+    "expect_flag": false
+  },
+  {
+    "name": "IN via ANY(array) — postgres.js parametriza o array inteiro — SEGURO",
+    "code": "const statuses = ['open', 'pending', 'paid'];\nconst rows = await sql`SELECT * FROM orders WHERE status = ANY(${statuses}) AND tenant_id = ${tenantId}`;",
+    "expect_flag": false
+  },
+  {
+    "name": "IN via helper sql(ids) — expansao parametrizada, nao concatenacao — SEGURO",
+    "code": "const ids = req.body.ids as number[];\nconst rows = await sql`SELECT * FROM users WHERE id IN ${sql(ids)}`;",
+    "expect_flag": false
+  },
+  {
+    "name": "INSERT INTO ... VALUES com binds posicionais — SEGURO",
+    "code": "await sql`INSERT INTO audit_logs (user_id, action, ip) VALUES (${userId}, ${action}, ${ip})`;",
+    "expect_flag": false
+  },
+  {
+    "name": "INSERT via helper sql(obj, cols) — colunas/valores parametrizados — SEGURO",
+    "code": "const newUser = { name, email, role };\nconst [created] = await sql`INSERT INTO users ${sql(newUser, 'name', 'email', 'role')} RETURNING *`;",
+    "expect_flag": false
+  },
+  {
+    "name": "UPDATE SET com helper sql(patch) + WHERE bind — SEGURO",
+    "code": "const patch = { name: body.name, updated_at: new Date() };\nawait sql`UPDATE profiles SET ${sql(patch, 'name', 'updated_at')} WHERE id = ${id}`;",
+    "expect_flag": false
+  },
+  {
+    "name": "ctx.sql multiline (repository pattern) — tagged com bind — SEGURO",
+    "code": "async function getInvoices(ctx: DbCtx, customerId: string) {\n  return await ctx.sql`\n    SELECT *\n    FROM invoices\n    WHERE customer_id = ${customerId}\n      AND status = 'open'\n    ORDER BY created_at DESC\n  `;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "Template literal ANINHADO dentro da interpolacao do sql — crase dentro de ${} — SEGURO (bind unico)",
+    "code": "const prefix = 'acct';\nconst rows = await sql`SELECT * FROM accounts WHERE handle = ${`${prefix}_${slug}_${region}`}`;",
+    "expect_flag": false
+  },
+  {
+    "name": "Fragmentos sql condicionais encadeados (composicao de tagged templates) — SEGURO",
+    "code": "const activeClause = onlyActive ? sql`AND active = true` : sql``;\nconst roleClause = role ? sql`AND role = ${role}` : sql``;\nconst rows = await sql`SELECT * FROM members WHERE org_id = ${orgId} ${activeClause} ${roleClause}`;",
+    "expect_flag": false
+  },
+  {
+    "name": "Conteudo do sql contem CRASE literal (escapada \\`) como texto — mais bind — SEGURO",
+    "code": "const rows = await sql`SELECT id, 'render \\`code\\` inline' AS hint FROM snippets WHERE lang = ${lang}`;",
+    "expect_flag": false
+  },
+  {
+    "name": "Conteudo do sql contem ${} literal (cifrao-chave escapado \\${}) como texto — SEGURO",
+    "code": "const rows = await sql`SELECT format('greeting: \\${name}') AS tpl FROM templates WHERE id = ${templateId}`;",
+    "expect_flag": false
+  },
+  {
+    "name": "Identificadores dinamicos via sql(cols)/sql(table) — escape de identificador, nao string raw — SEGURO",
+    "code": "const cols = ['id', 'email', 'created_at'];\nconst rows = await sql`SELECT ${sql(cols)} FROM ${sql(tableName)} WHERE tenant = ${tenant}`;",
+    "expect_flag": false
+  },
+  {
+    "name": "Paginacao LIMIT/OFFSET com binds numericos — SEGURO",
+    "code": "const page = await sql`\n  SELECT * FROM posts\n  WHERE author_id = ${authorId}\n  ORDER BY id DESC\n  LIMIT ${limit} OFFSET ${offset}\n`;",
+    "expect_flag": false
+  },
+  {
+    "name": "JOIN multiline com dois binds — tagged sql — SEGURO",
+    "code": "const rows = await sql`\n  SELECT u.id, p.title\n  FROM users u\n  JOIN posts p ON p.author_id = u.id\n  WHERE u.tenant_id = ${tenantId}\n    AND p.published = ${published}\n`;",
+    "expect_flag": false
+  },
+  {
+    "name": "ctx.sql em transacao (sql.begin) com ternario encadeado na interpolacao — SEGURO",
+    "code": "await sql.begin(async (ctx) => {\n  const weight = level === 'hi' ? 3 : level === 'mid' ? 2 : 1;\n  await ctx.sql`UPDATE tasks SET priority = ${weight} WHERE id = ${taskId}`;\n  await ctx.sql`INSERT INTO task_events (task_id, kind) VALUES (${taskId}, ${'reprioritized'})`;\n});",
+    "expect_flag": false
+  },
+  {
+    "name": "WHERE concat aspas+var em .unsafe() — string montada por concatenacao",
+    "code": "async function getUser(db: Sql, email: string) {\n  const q = \"SELECT id, name FROM users WHERE email = '\" + email + \"'\";\n  return db.unsafe(q);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "INSERT VALUES concatenado com aspas em .unsafe()",
+    "code": "function insertLog(sql: Sql, userId: string, action: string) {\n  const query =\n    \"INSERT INTO audit_log (user_id, action) VALUES ('\" +\n    userId + \"', '\" + action + \"')\";\n  return sql.unsafe(query);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "UPDATE SET concatenado passado a pool.query()",
+    "code": "async function updateName(pool: Pool, id: number, name: string) {\n  const stmt =\n    \"UPDATE profiles SET display_name = '\" + name + \"' WHERE id = \" + id;\n  return pool.query(stmt);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "WHERE — template NAO-taggeado (sem sql antes da crase) em .unsafe()",
+    "code": "async function findByStatus(sql: Sql, status: string) {\n  return sql.unsafe(`SELECT id, title FROM orders WHERE status = '${status}'`);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "LIKE %term% — template nao-taggeado em pool.query()",
+    "code": "const search = async (pool: Pool, term: string) => {\n  return pool.query(`SELECT * FROM products WHERE name ILIKE '%${term}%'`);\n};",
+    "expect_flag": true
+  },
+  {
+    "name": "WHERE numerico — template nao-taggeado em client.query()",
+    "code": "async function del(client: PoolClient, id: number) {\n  await client.query(`DELETE FROM sessions WHERE id = ${id}`);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "LIKE prefixo concatenado com aspas em .unsafe()",
+    "code": "function suggest(sql: Sql, prefix: string) {\n  const q = \"SELECT city FROM municipios WHERE city LIKE '\" + prefix + \"%'\";\n  return sql.unsafe(q);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "IN (...) via ids.join() interpolado em template nao-taggeado",
+    "code": "async function byIds(sql: Sql, ids: number[]) {\n  const list = ids.join(\",\");\n  return sql.unsafe(`SELECT * FROM invoices WHERE id IN (${list})`);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "FROM nome de tabela dinamico concatenado em .unsafe()",
+    "code": "function dump(sql: Sql, tableName: string) {\n  return sql.unsafe(\"SELECT * FROM \" + tableName + \" LIMIT 100\");\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "ORDER BY coluna dinamica — template nao-taggeado em .query()",
+    "code": "async function listSorted(db: Sql, column: string) {\n  return db.query(`SELECT * FROM employees ORDER BY ${column} DESC`);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "WHERE — template nao-taggeado passado a .execute()",
+    "code": "async function runReport(conn: Connection, region: string) {\n  return conn.execute(`SELECT sum(total) FROM sales WHERE region = '${region}'`);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "Auth bypass — dupla concatenacao user+pass com aspas em .unsafe()",
+    "code": "function auth(sql: Sql, user: string, pass: string) {\n  const query =\n    \"SELECT * FROM accounts WHERE username = '\" + user +\n    \"' AND password = '\" + pass + \"'\";\n  return sql.unsafe(query);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "INSERT VALUES montado por += (acumulo de string) em .unsafe()",
+    "code": "async function addProduct(sql: Sql, name: string, price: string) {\n  let query = \"INSERT INTO products (name, price) VALUES (\";\n  query += \"'\" + name + \"', \" + price + \")\";\n  return sql.unsafe(query);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "UPDATE SET — template nao-taggeado em pool.query()",
+    "code": "async function setRole(pool: Pool, role: string, userId: string) {\n  return pool.query(`UPDATE users SET role = '${role}' WHERE id = '${userId}'`);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "IN (...) via map+join de aspas em template nao-taggeado (client.query)",
+    "code": "async function fetchTags(client: PoolClient, tags: string[]) {\n  const inList = tags.map((t) => `'${t}'`).join(\",\");\n  return client.query(`SELECT * FROM posts WHERE tag IN (${inList})`);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "FROM schema.tabela dinamico concatenado em .unsafe()",
+    "code": "function crossJoin(sql: Sql, schema: string, table: string) {\n  const q =\n    \"SELECT * FROM \" + schema + \".\" + table + \" WHERE deleted = false\";\n  return sql.unsafe(q);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "tag sql quebrada em linha antes da crase — JS permite whitespace/newline entre tag e template, continua tagged = bind SEGURO; quebra regex que exige sql` na mesma linha",
+    "code": "const userId = req.params.id;\nconst rows = await sql\n  `SELECT id, name FROM users WHERE id = ${userId}`;\nreturn rows;",
+    "expect_flag": false
+  },
+  {
+    "name": "crase ESCAPADA (\\`) dentro do template tagged — engana regex que casa a crase de fechamento cedo e acha que ${id} ficou fora; ainda e sql tagged = SEGURO",
+    "code": "const id = ctx.params.id;\nconst rows = await sql`SELECT '\\`' || name AS quoted FROM t WHERE id = ${id}`;\nreturn rows;",
+    "expect_flag": false
+  },
+  {
+    "name": "sql`...` aparece DENTRO de uma string literal normal (hint) — nao pode tornar o concat vizinho seguro; o concat com userName e a vuln real = INSEGURO",
+    "code": "const hint = \"use sql`SELECT ...${x}` em vez de concatenar\";\nconst query = \"SELECT * FROM users WHERE name = '\" + userName + \"'\";\nconst rows = await pool.query(query);\nreturn rows;",
+    "expect_flag": true
+  },
+  {
+    "name": "COMENTARIO contendo sql`...${v}...` como exemplo bom — o codigo real e concat de variaveis; comentario nao deve neutralizar a deteccao = INSEGURO",
+    "code": "// GOOD: sql`UPDATE t SET x = ${v} WHERE id = ${id}`\nconst q = \"UPDATE accounts SET balance = balance + \" + amount + \" WHERE id = \" + accId;\nawait client.query(q);",
+    "expect_flag": true
+  },
+  {
+    "name": "templates profundamente aninhados na interpolacao de um sql tagged — crases internas confundem o matcher, mas tudo vira bind param = SEGURO",
+    "code": "const rows = await sql`SELECT * FROM events WHERE label = ${`${prefix}-${inner}-${suffix}`} AND ts > ${since}`;\nreturn rows;",
+    "expect_flag": false
+  },
+  {
+    "name": "concat REAL na MESMA linha fisica de um sql`SELECT now()` nao-relacionado — detector por-linha ve o sql` e limpa a linha inteira; o concat com host e INSEGURO",
+    "code": "const ok = await sql`SELECT now()`; const bad = \"SELECT * FROM u WHERE h='\" + host + \"'\"; await pool.query(bad);",
+    "expect_flag": true
+  },
+  {
+    "name": "concatenacao de string DENTRO da interpolacao ${} de um sql tagged — o valor concatenado ainda e passado como bind param, portanto SEGURO apesar do + com aspas perto de sql",
+    "code": "const rows = await sql`SELECT * FROM users WHERE email = ${'user_' + userId + '@corp.com'}`;\nreturn rows;",
+    "expect_flag": false
+  },
+  {
+    "name": "template literal NAO-taggeado (crase sem sql antes) atribuido a q e passado a pool.query — interpolacao entra crua na string, sem bind = INSEGURO",
+    "code": "const q = `SELECT * FROM orders WHERE customer = ${customerId}`;\nawait pool.query(q);",
+    "expect_flag": true
+  },
+  {
+    "name": "sql.unsafe(`...${tableName}...`) — o token sql aparece mas a crase e taggeada por NADA (arg de unsafe), interpolacao vira string crua = INSEGURO",
+    "code": "await sql.unsafe(`SELECT * FROM ${tableName} WHERE status = ${status}`);",
+    "expect_flag": true
+  },
+  {
+    "name": "variavel chamada rawSql (substring 'sql' e red herring) recebe concat de aspas+variavel e vai pra sql.unsafe = INSEGURO",
+    "code": "let rawSql = \"DELETE FROM sessions WHERE token = '\" + token + \"'\";\nawait sql.unsafe(rawSql);",
+    "expect_flag": true
+  },
+  {
+    "name": "ctx.sql`...${ownerId}...` — tag por member-access explicitamente coberta pela regra, bind = SEGURO; quebra regex que so casa \\bsql` e ignora o ponto",
+    "code": "const rows = await ctx.sql`SELECT * FROM tenants WHERE owner = ${ownerId} AND active = ${true}`;\nreturn rows;",
+    "expect_flag": false
+  },
+  {
+    "name": "template NAO-taggeado passado a pool.query mas com ZERO interpolacoes (string estatica) — sem vetor de injecao = SEGURO; pega heuristica 'template nao-tagged em query => flag' que da falso-positivo",
+    "code": "const rows = await pool.query(`SELECT COUNT(*) FROM audit_log`);\nreturn rows;",
+    "expect_flag": false
+  },
+  {
+    "name": "concatenacao com + porem SO de literais de string (sem nenhuma variavel/entrada) passada a client.query — nao ha interpolacao de dado = SEGURO; pega heuristica 'aspas + concat => flag'",
+    "code": "const q = \"SELECT * FROM \" + \"audit_log\" + \" ORDER BY ts DESC LIMIT 100\";\nawait client.query(q);",
+    "expect_flag": false
+  },
+  {
+    "name": "helpers sql() aninhados na interpolacao (sql(columns), sql(ids)) dentro do sql tagged — fragmento/array parametrizado do postgres.js, parenteses internos confundem o parser mas e bind = SEGURO",
+    "code": "const rows = await sql`SELECT ${sql(columns)} FROM users WHERE id IN ${sql(ids)} AND role = ${role}`;\nreturn rows;",
+    "expect_flag": false
+  },
+  {
+    "name": "where_id_numeric_bind",
+    "code": "import { sql } from './db'\n\nexport async function getUserById(id: number) {\n  const [user] = await sql`SELECT id, name, email FROM users WHERE id = ${id}`\n  return user\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "like_concat_inside_bind",
+    "code": "export async function searchByName(term: string) {\n  // the '%' + term + '%' is JS concat, but it is a SINGLE bind value\n  return sql`SELECT * FROM customers WHERE name LIKE ${'%' + term + '%'}`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "ilike_nested_template_bind",
+    "code": "export async function fuzzySearch(q: string) {\n  return sql`SELECT * FROM articles WHERE title ILIKE ${`%${q}%`} ORDER BY published_at DESC`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "in_clause_array_helper",
+    "code": "export async function getUsersByIds(ids: number[]) {\n  return sql`SELECT * FROM users WHERE id IN ${sql(ids)}`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "insert_row_object_helper",
+    "code": "export async function createUser(newUser: { name: string; email: string; role: string }) {\n  return sql`INSERT INTO users ${sql(newUser, 'name', 'email', 'role')} RETURNING *`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "order_by_identifier_helper",
+    "code": "export async function listSorted(column: string, dir: 'asc' | 'desc') {\n  return sql`SELECT * FROM products ORDER BY ${sql(column)} ${dir === 'asc' ? sql`ASC` : sql`DESC`}`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "limit_offset_numeric_binds",
+    "code": "export async function paginate(limit: number, offset: number) {\n  return sql`SELECT * FROM orders ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "update_set_binds",
+    "code": "export async function updateProfile(id: number, name: string, email: string) {\n  return sql`UPDATE users SET name = ${name}, email = ${email}, updated_at = now() WHERE id = ${id}`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "insert_values_binds",
+    "code": "export async function logEvent(userId: number, type: string, payload: unknown) {\n  return sql`INSERT INTO events (user_id, type, payload) VALUES (${userId}, ${type}, ${sql.json(payload)})`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "where_and_multiple_binds",
+    "code": "export async function findActive(role: string, minAge: number) {\n  return sql`SELECT * FROM users WHERE role = ${role} AND age >= ${minAge} AND active = ${true}`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "between_range_binds",
+    "code": "export async function revenueBetween(start: string, end: string) {\n  return sql`SELECT sum(total) FROM orders WHERE created_at BETWEEN ${start} AND ${end}`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "in_list_indexed_binds",
+    "code": "export async function pairLookup(codes: string[]) {\n  // codes[0], codes[1]... look like string building but each is its own bind\n  return sql`SELECT * FROM regions WHERE code IN (${codes[0]}, ${codes[1]}, ${codes[2]})`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "ctx_sql_where_email",
+    "code": "export async function handler(ctx: { sql: any }, email: string) {\n  return ctx.sql`SELECT id FROM accounts WHERE email = ${email} LIMIT 1`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "jsonb_contains_bind",
+    "code": "export async function byMetadata(filter: Record<string, unknown>) {\n  return sql`SELECT * FROM documents WHERE metadata @> ${sql.json(filter)}`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "raw_user_input_bind",
+    "code": "app.get('/search', async (req, res) => {\n  // raw request input, but interpolated as a bind => still safe\n  const rows = await sql`SELECT * FROM posts WHERE author = ${req.query.author}`\n  res.json(rows)\n})",
+    "expect_flag": false
+  },
+  {
+    "name": "like_prefix_concat_bind",
+    "code": "export async function autocomplete(prefix: string) {\n  return sql`SELECT name FROM cities WHERE name LIKE ${prefix + '%'} LIMIT 10`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "dynamic_where_nested_fragments",
+    "code": "export async function search(filters: { active?: boolean; role?: string }) {\n  const conds: any[] = []\n  if (filters.active !== undefined) conds.push(sql`active = ${filters.active}`)\n  if (filters.role) conds.push(sql`role = ${filters.role}`)\n  const where = conds.length\n    ? sql`WHERE ${conds.reduce((a, b) => sql`${a} AND ${b}`)}`\n    : sql``\n  return sql`SELECT * FROM users ${where}`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "multiline_report_binds",
+    "code": "export async function report(from: string, to: string, status: string) {\n  return sql`\n    SELECT date_trunc('day', created_at) AS day, count(*)\n    FROM tickets\n    WHERE created_at >= ${from}\n      AND created_at < ${to}\n      AND status = ${status}\n    GROUP BY day\n    ORDER BY day\n  `\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "upsert_on_conflict_binds",
+    "code": "export async function upsertSetting(key: string, value: string) {\n  return sql`\n    INSERT INTO settings (key, value) VALUES (${key}, ${value})\n    ON CONFLICT (key) DO UPDATE SET value = ${value}\n  `\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "array_append_set_bind",
+    "code": "export async function addTag(id: number, tag: string) {\n  return sql`UPDATE posts SET tags = array_append(tags, ${tag}) WHERE id = ${id}`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "any_array_bind",
+    "code": "export async function byStatuses(statuses: string[]) {\n  return sql`SELECT * FROM jobs WHERE status = ANY(${statuses}) ORDER BY priority`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "count_where_tenant_bind",
+    "code": "export async function countByTenant(tenantId: string) {\n  const [{ count }] = await sql`SELECT count(*)::int AS count FROM invoices WHERE tenant_id = ${tenantId}`\n  return count\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "delete_where_token_bind",
+    "code": "export async function purgeSession(token: string) {\n  return sql`DELETE FROM sessions WHERE token = ${token} AND expires_at < now()`\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "keyset_pagination_binds",
+    "code": "export async function keyset(cursor: { createdAt: string; id: number }, pageSize: number) {\n  return sql`\n    SELECT * FROM feed\n    WHERE (created_at, id) < (${cursor.createdAt}, ${cursor.id})\n    ORDER BY created_at DESC, id DESC\n    LIMIT ${pageSize}\n  `\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "nestedTemplateInInterpolation",
+    "code": "const prefix = 'user'\nconst rows = await sql`SELECT * FROM events WHERE key = ${`${prefix}:${userId}`}`",
+    "expect_flag": false
+  },
+  {
+    "name": "deeplyNestedTemplateTwoLevels",
+    "code": "const rows = await sql`SELECT * FROM metrics WHERE tag = ${`env:${`${region}-${zone}`}`} AND host = ${host}`",
+    "expect_flag": false
+  },
+  {
+    "name": "multilineSelectOrdered",
+    "code": "const rows = await sql`\n  SELECT id, email, created_at\n  FROM accounts\n  WHERE status = ${status}\n    AND created_at >= ${since}\n  ORDER BY created_at DESC\n`",
+    "expect_flag": false
+  },
+  {
+    "name": "multilineWithCTE",
+    "code": "const rows = await sql`\n  WITH recent AS (\n    SELECT * FROM orders WHERE placed_at > ${cutoff}\n  )\n  SELECT customer_id, COUNT(*) FROM recent\n  WHERE region = ${region}\n  GROUP BY customer_id\n`",
+    "expect_flag": false
+  },
+  {
+    "name": "ctxSqlBasicBind",
+    "code": "const rows = await ctx.sql`SELECT * FROM sessions WHERE token = ${token}`",
+    "expect_flag": false
+  },
+  {
+    "name": "ctxSqlMultilineReturning",
+    "code": "const rows = await ctx.sql`\n  UPDATE invoices\n  SET paid = true, paid_at = ${paidAt}\n  WHERE id = ${invoiceId}\n  RETURNING *\n`",
+    "expect_flag": false
+  },
+  {
+    "name": "conditionalFragmentTernary",
+    "code": "const activeFilter = onlyActive ? sql`AND active = ${true}` : sql``\nconst rows = await sql`SELECT * FROM users WHERE org_id = ${orgId} ${activeFilter}`",
+    "expect_flag": false
+  },
+  {
+    "name": "conditionalFragmentChainMulti",
+    "code": "const byName = name ? sql`AND name ILIKE ${'%' + name + '%'}` : sql``\nconst byRole = role ? sql`AND role = ${role}` : sql``\nconst rows = await sql`SELECT * FROM members WHERE team_id = ${teamId} ${byName} ${byRole}`",
+    "expect_flag": false
+  },
+  {
+    "name": "emptyFragmentLimitFallback",
+    "code": "const limitClause = limit ? sql`LIMIT ${limit}` : sql``\nconst rows = await sql`SELECT * FROM logs WHERE level = ${level} ORDER BY ts DESC ${limitClause}`",
+    "expect_flag": false
+  },
+  {
+    "name": "dynamicColumnsIdentifierHelper",
+    "code": "const columns = ['id', 'name', 'email']\nconst rows = await sql`SELECT ${sql(columns)} FROM users WHERE tenant = ${tenant}`",
+    "expect_flag": false
+  },
+  {
+    "name": "insertObjectHelper",
+    "code": "const user = { name: fullName, email, role }\nconst rows = await sql`INSERT INTO users ${sql(user)} RETURNING id`",
+    "expect_flag": false
+  },
+  {
+    "name": "updateObjectHelperPickedKeys",
+    "code": "const patch = { status, updated_at: now }\nconst rows = await sql`UPDATE tickets SET ${sql(patch, 'status', 'updated_at')} WHERE id = ${ticketId}`",
+    "expect_flag": false
+  },
+  {
+    "name": "inArrayHelper",
+    "code": "const ids = selected.map(s => s.id)\nconst rows = await sql`SELECT * FROM products WHERE id IN ${sql(ids)}`",
+    "expect_flag": false
+  },
+  {
+    "name": "multiInsertArrayOfObjectsHelper",
+    "code": "const users = [{ name: 'a', email: 'a@x.com' }, { name: 'b', email: 'b@x.com' }]\nconst rows = await sql`INSERT INTO users ${sql(users, 'name', 'email')} RETURNING id`",
+    "expect_flag": false
+  },
+  {
+    "name": "literalBacktickInTemplateBody",
+    "code": "const rows = await sql`SELECT * FROM commands WHERE hint = ${hint} /* run \\`make build\\` before deploy */`",
+    "expect_flag": false
+  },
+  {
+    "name": "literalBacktickInInterpolatedString",
+    "code": "const doc = 'wrap identifiers in \\`double quotes\\` not backticks'\nconst rows = await sql`UPDATE guides SET body = ${doc} WHERE slug = ${slug}`",
+    "expect_flag": false
+  },
+  {
+    "name": "literalDollarBraceAsText",
+    "code": "const template = 'Hello \\${customerName}, your order shipped'\nconst rows = await sql`INSERT INTO messages (body, user_id) VALUES (${template}, ${userId})`",
+    "expect_flag": false
+  },
+  {
+    "name": "dollarQuotedFunctionBody",
+    "code": "const rows = await sql`\n  SELECT format($$Hello %s$$, ${name}) AS greeting\n  FROM ctx\n  WHERE id = ${id}\n`",
+    "expect_flag": false
+  },
+  {
+    "name": "nestedFragmentWithColumnsHelper",
+    "code": "const cols = ['id', 'title']\nconst order = desc ? sql`ORDER BY created_at DESC` : sql`ORDER BY created_at ASC`\nconst rows = await sql`SELECT ${sql(cols)} FROM posts WHERE author = ${author} ${order}`",
+    "expect_flag": false
+  },
+  {
+    "name": "whereBuilderReduceFragments",
+    "code": "const conditions = [sql`status = ${status}`, sql`priority >= ${minPriority}`]\nconst where = conditions.reduce((acc, cond, i) => i === 0 ? sql`WHERE ${cond}` : sql`${acc} AND ${cond}`, sql``)\nconst rows = await sql`SELECT * FROM tasks ${where}`",
+    "expect_flag": false
+  },
+  {
+    "name": "qualifiedTableIdentifierHelperNested",
+    "code": "const qualified = sql(`${schema}.${table}`)\nconst rows = await sql`SELECT * FROM ${qualified} WHERE id = ${id}`",
+    "expect_flag": false
+  },
+  {
+    "name": "ctxSqlWithHelperColumns",
+    "code": "const cols = ['id', 'amount', 'currency']\nconst rows = await ctx.sql`SELECT ${ctx.sql(cols)} FROM payments WHERE account = ${accountId}`",
+    "expect_flag": false
+  },
+  {
+    "name": "nestedTemplatePathInInterpolation",
+    "code": "const rows = await sql`SELECT * FROM audit WHERE path = ${`/api/${version}/users`} AND method = ${method}`",
+    "expect_flag": false
+  },
+  {
+    "name": "multilineInHelperPlusFragmentCombined",
+    "code": "const statusFilter = statuses.length ? sql`AND status IN ${sql(statuses)}` : sql``\nconst rows = await sql`\n  SELECT o.id, o.total, ${sql(fields)}\n  FROM orders o\n  WHERE o.tenant_id = ${tenantId}\n  ${statusFilter}\n  ORDER BY o.created_at DESC\n  LIMIT ${pageSize}\n`",
+    "expect_flag": false
+  },
+  {
+    "name": "findUserById_bind",
+    "code": "export async function findUserById(sql, id) {\n  const [user] = await sql`\n    SELECT id, email, name, created_at\n    FROM users\n    WHERE id = ${id}\n    LIMIT 1\n  `;\n  return user ?? null;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "listActiveUsersPaginated_bind",
+    "code": "export async function listActiveUsers(sql, { limit = 20, offset = 0 } = {}) {\n  return sql`\n    SELECT id, email, name\n    FROM users\n    WHERE status = ${'active'}\n    ORDER BY created_at DESC\n    LIMIT ${limit}\n    OFFSET ${offset}\n  `;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "createOrderReturning_bind",
+    "code": "export async function createOrder(sql, { customerId, total, currency }) {\n  const [order] = await sql`\n    INSERT INTO orders (customer_id, total, currency, status)\n    VALUES (${customerId}, ${total}, ${currency}, ${'pending'})\n    RETURNING id, customer_id, total, status, created_at\n  `;\n  return order;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "upsertProductOnConflict_bind",
+    "code": "export async function upsertProduct(sql, { sku, name, price }) {\n  const [product] = await sql`\n    INSERT INTO products (sku, name, price)\n    VALUES (${sku}, ${name}, ${price})\n    ON CONFLICT (sku)\n    DO UPDATE SET name = ${name}, price = ${price}, updated_at = now()\n    RETURNING id, sku, name, price\n  `;\n  return product;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "transferFundsTransaction_bind",
+    "code": "export async function transferFunds(sql, fromId, toId, amount) {\n  return sql.begin(async ctx => {\n    await ctx`\n      UPDATE accounts SET balance = balance - ${amount}\n      WHERE id = ${fromId}\n    `;\n    await ctx`\n      UPDATE accounts SET balance = balance + ${amount}\n      WHERE id = ${toId}\n    `;\n    const [entry] = await ctx`\n      INSERT INTO ledger (from_id, to_id, amount)\n      VALUES (${fromId}, ${toId}, ${amount})\n      RETURNING id\n    `;\n    return entry;\n  });\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "getOrdersWithCustomerJoin_bind",
+    "code": "export async function getOrdersWithCustomer(sql, status) {\n  return sql`\n    SELECT o.id, o.total, o.status,\n           c.id AS customer_id, c.name AS customer_name\n    FROM orders o\n    INNER JOIN customers c ON c.id = o.customer_id\n    LEFT JOIN addresses a ON a.customer_id = c.id\n    WHERE o.status = ${status}\n    ORDER BY o.created_at DESC\n  `;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "updateUserEmailReturning_bind",
+    "code": "export async function updateUserEmail(sql, userId, newEmail) {\n  const [updated] = await sql`\n    UPDATE users\n    SET email = ${newEmail}, updated_at = now()\n    WHERE id = ${userId}\n    RETURNING id, email, updated_at\n  `;\n  return updated;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "deleteExpiredSessions_bind",
+    "code": "export async function deleteExpiredSessions(sql, before) {\n  const result = await sql`\n    DELETE FROM sessions\n    WHERE expires_at < ${before}\n  `;\n  return result.count;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "searchPostsByTagPaginated_bind",
+    "code": "export async function searchPostsByTag(sql, tag, page = 1, pageSize = 15) {\n  const offset = (page - 1) * pageSize;\n  return sql`\n    SELECT p.id, p.title, p.slug, p.published_at\n    FROM posts p\n    JOIN post_tags pt ON pt.post_id = p.id\n    JOIN tags t ON t.id = pt.tag_id\n    WHERE t.name = ${tag} AND p.published = ${true}\n    ORDER BY p.published_at DESC\n    LIMIT ${pageSize} OFFSET ${offset}\n  `;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "countOrdersByStatus_bind",
+    "code": "export async function countOrdersByStatus(sql, status) {\n  const [{ count }] = await sql`\n    SELECT count(*)::int AS count\n    FROM orders\n    WHERE status = ${status}\n  `;\n  return count;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "paginateInvoicesCursor_bind",
+    "code": "export async function paginateInvoices(sql, customerId, { limit, cursor }) {\n  return sql`\n    SELECT id, number, amount, due_date\n    FROM invoices\n    WHERE customer_id = ${customerId}\n      AND created_at < ${cursor}\n    ORDER BY created_at DESC\n    LIMIT ${limit}\n  `;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "insertAuditLogJson_bind",
+    "code": "export async function insertAuditLog(sql, { actorId, action, resource, meta }) {\n  await sql`\n    INSERT INTO audit_logs (actor_id, action, resource, meta)\n    VALUES (${actorId}, ${action}, ${resource}, ${sql.json(meta)})\n  `;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "getUserPermissionsJoin_bind",
+    "code": "export async function getUserPermissions(sql, userId) {\n  return sql`\n    SELECT DISTINCT perm.code\n    FROM users u\n    JOIN user_roles ur ON ur.user_id = u.id\n    JOIN role_permissions rp ON rp.role_id = ur.role_id\n    JOIN permissions perm ON perm.id = rp.permission_id\n    WHERE u.id = ${userId}\n  `;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "bulkInsertTagsHelper_bind",
+    "code": "export async function bulkInsertTags(sql, postId, tagNames) {\n  const rows = tagNames.map(name => ({ post_id: postId, name }));\n  return sql`\n    INSERT INTO tags ${sql(rows, 'post_id', 'name')}\n    ON CONFLICT (post_id, name) DO NOTHING\n    RETURNING id, name\n  `;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "upsertUserSettings_bind",
+    "code": "export async function upsertUserSettings(sql, userId, settings) {\n  const [row] = await sql`\n    INSERT INTO user_settings (user_id, theme, locale, notifications)\n    VALUES (${userId}, ${settings.theme}, ${settings.locale}, ${settings.notifications})\n    ON CONFLICT (user_id)\n    DO UPDATE SET theme = ${settings.theme}, locale = ${settings.locale}, notifications = ${settings.notifications}\n    RETURNING *\n  `;\n  return row;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "createOrderWithItemsTransaction_bind",
+    "code": "export async function createOrderWithItems(sql, order, items) {\n  return sql.begin(async ctx => {\n    const [created] = await ctx`\n      INSERT INTO orders (customer_id, total)\n      VALUES (${order.customerId}, ${order.total})\n      RETURNING id\n    `;\n    for (const item of items) {\n      await ctx`\n        INSERT INTO order_items (order_id, product_id, qty, price)\n        VALUES (${created.id}, ${item.productId}, ${item.qty}, ${item.price})\n      `;\n    }\n    return created.id;\n  });\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "getTopCustomersAggregate_bind",
+    "code": "export async function getTopCustomers(sql, since, limit = 10) {\n  return sql`\n    SELECT c.id, c.name, sum(o.total) AS revenue, count(o.id) AS orders\n    FROM customers c\n    JOIN orders o ON o.customer_id = c.id\n    WHERE o.created_at >= ${since}\n    GROUP BY c.id, c.name\n    HAVING sum(o.total) > ${0}\n    ORDER BY revenue DESC\n    LIMIT ${limit}\n  `;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "adjustInventoryTransaction_bind",
+    "code": "export async function adjustInventory(sql, productId, delta, reason) {\n  return sql.begin(async ctx => {\n    const [stock] = await ctx`\n      UPDATE inventory\n      SET quantity = quantity + ${delta}\n      WHERE product_id = ${productId}\n      RETURNING quantity\n    `;\n    await ctx`\n      INSERT INTO inventory_movements (product_id, delta, reason)\n      VALUES (${productId}, ${delta}, ${reason})\n    `;\n    return stock.quantity;\n  });\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "findProductsByCategoryFiltered_bind",
+    "code": "export async function findProductsByCategory(sql, categoryId, minPrice, maxPrice, limit) {\n  return sql`\n    SELECT id, name, price, category_id\n    FROM products\n    WHERE category_id = ${categoryId}\n      AND price BETWEEN ${minPrice} AND ${maxPrice}\n      AND active = ${true}\n    ORDER BY price ASC\n    LIMIT ${limit}\n  `;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "softDeleteAccountReturning_bind",
+    "code": "export async function softDeleteAccount(sql, accountId, deletedBy) {\n  const [account] = await sql`\n    UPDATE accounts\n    SET deleted_at = now(), deleted_by = ${deletedBy}\n    WHERE id = ${accountId} AND deleted_at IS NULL\n    RETURNING id, deleted_at\n  `;\n  return account;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "getMonthlyRevenueRange_bind",
+    "code": "export async function getMonthlyRevenue(sql, tenantId, startDate, endDate) {\n  return sql`\n    SELECT date_trunc('month', o.created_at) AS month,\n           sum(o.total) AS revenue\n    FROM orders o\n    WHERE o.tenant_id = ${tenantId}\n      AND o.created_at >= ${startDate}\n      AND o.created_at < ${endDate}\n    GROUP BY 1\n    ORDER BY 1\n  `;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "reassignTicketsInList_bind",
+    "code": "export async function reassignTickets(sql, ticketIds, assigneeId) {\n  return sql`\n    UPDATE tickets\n    SET assignee_id = ${assigneeId}, updated_at = now()\n    WHERE id IN ${sql(ticketIds)}\n    RETURNING id, assignee_id\n  `;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "incrementLoginAttemptsReturning_bind",
+    "code": "export async function incrementLoginAttempts(sql, email) {\n  const [row] = await sql`\n    UPDATE auth_users\n    SET login_attempts = login_attempts + 1, last_attempt_at = now()\n    WHERE email = ${email}\n    RETURNING login_attempts\n  `;\n  return row?.login_attempts ?? 0;\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "archiveOldRecordsSubqueryTransaction_bind",
+    "code": "export async function archiveOldRecords(sql, cutoff, batchSize) {\n  return sql.begin(async ctx => {\n    const moved = await ctx`\n      INSERT INTO records_archive\n      SELECT * FROM records\n      WHERE created_at < ${cutoff}\n      ORDER BY created_at ASC\n      LIMIT ${batchSize}\n      RETURNING id\n    `;\n    await ctx`\n      DELETE FROM records\n      WHERE id IN ${ctx(moved.map(r => r.id))}\n    `;\n    return moved.length;\n  });\n}",
+    "expect_flag": false
+  },
+  {
+    "name": "concatUserLookupUnsafe",
+    "code": "async function getUser(userId: string) {\n  const q = \"SELECT * FROM users WHERE id = '\" + userId + \"'\";\n  const rows = await sql.unsafe(q);\n  return rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "concatOrderByIdClientQuery",
+    "code": "async function findOrder(orderId: string) {\n  const query = \"SELECT * FROM orders WHERE order_id = \" + orderId;\n  const result = await client.query(query);\n  return result.rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "untaggedTemplateToPoolQuery",
+    "code": "async function byCategory(category: string) {\n  const text = `SELECT * FROM products WHERE category = '${category}'`;\n  const { rows } = await pool.query(text);\n  return rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "untaggedTemplateToUnsafe",
+    "code": "async function killSession(token: string) {\n  const stmt = `DELETE FROM sessions WHERE token = '${token}'`;\n  await sql.unsafe(stmt);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "plusEqualsInvoiceFilter",
+    "code": "async function listInvoices(status: string, customerId?: string) {\n  let q = \"SELECT * FROM invoices WHERE 1=1\";\n  q += \" AND status = '\" + status + \"'\";\n  if (customerId) q += \" AND customer_id = \" + customerId;\n  const rows = await sql.unsafe(q);\n  return rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "dynamicTableNameConcat",
+    "code": "async function dumpTable(req) {\n  const table = req.params.table;\n  const rows = await sql.unsafe(\"SELECT * FROM \" + table + \" LIMIT 10\");\n  return rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "dynamicOrderByColumn",
+    "code": "async function sortedEmployees(req) {\n  const sortCol = req.query.sort;\n  const query = `SELECT * FROM employees ORDER BY ${sortCol}`;\n  const result = await pool.query(query);\n  return result.rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "concatLoginCredentials",
+    "code": "async function login(username: string, password: string) {\n  const q = \"SELECT id FROM accounts WHERE username = '\" + username + \"' AND password = '\" + password + \"'\";\n  const rows = await client.query(q);\n  return rows.rows[0];\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "untaggedTemplateToExecute",
+    "code": "async function updateCart(cartId: number, qty: number) {\n  const stmt = `UPDATE carts SET qty = ${qty} WHERE id = ${cartId}`;\n  await db.execute(stmt);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "concatLikeSearchTerm",
+    "code": "async function searchArticles(term: string) {\n  const q = \"SELECT * FROM articles WHERE title LIKE '%\" + term + \"%'\";\n  const rows = await sql.unsafe(q);\n  return rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "concatDeleteCommentById",
+    "code": "async function removeComment(commentId: string) {\n  const query = \"DELETE FROM comments WHERE id = \" + commentId;\n  await client.query(query);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "untaggedTemplateInsertLog",
+    "code": "async function writeLog(message: string) {\n  const text = `INSERT INTO logs (msg) VALUES ('${message}')`;\n  await client.query(text);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "plusEqualsTicketWhere",
+    "code": "async function myTickets(assignee: string) {\n  let sqlText = \"SELECT * FROM tickets\";\n  sqlText += \" WHERE assignee = '\" + assignee + \"'\";\n  const rows = await pool.query(sqlText);\n  return rows.rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "dynamicSchemaQualifiedTable",
+    "code": "async function countRows(schema: string, tableName: string) {\n  const fullName = schema + \".\" + tableName;\n  const rows = await sql.unsafe(\"SELECT count(*) FROM \" + fullName);\n  return rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "concatInsertSubscriber",
+    "code": "async function addSubscriber(email: string, name: string) {\n  const q = \"INSERT INTO subscribers (email, name) VALUES ('\" + email + \"', '\" + name + \"')\";\n  await sql.unsafe(q);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "concatUpdateProfileBio",
+    "code": "async function updateBio(uid: number, bio: string) {\n  const q = \"UPDATE profiles SET bio = '\" + bio + \"' WHERE user_id = \" + uid;\n  await client.query(q);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "untaggedTemplateEventFilter",
+    "code": "async function eventsByDate(year: number, month: number) {\n  const text = `SELECT * FROM events WHERE year = ${year} AND month = ${month}`;\n  const { rows } = await pool.query(text);\n  return rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "concatInClauseJoin",
+    "code": "async function itemsByIds(ids: string[]) {\n  const q = \"SELECT * FROM items WHERE id IN (\" + ids.join(\",\") + \")\";\n  const rows = await sql.unsafe(q);\n  return rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "dynamicSortColAndDirection",
+    "code": "async function sortedLeads(sortCol: string, direction: string) {\n  const order = `${sortCol} ${direction}`;\n  const query = `SELECT * FROM leads ORDER BY ${order}`;\n  const rows = await client.query(query);\n  return rows.rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "concatEmailFilterFragment",
+    "code": "async function contactByEmail(email: string) {\n  const filter = \"WHERE email = '\" + email + \"'\";\n  const rows = await sql.unsafe(\"SELECT * FROM contacts \" + filter);\n  return rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "templateEmbeddingConcatToUnsafe",
+    "code": "async function jobsByStatus(status: string) {\n  const clause = \"status = '\" + status + \"'\";\n  const stmt = `SELECT * FROM jobs WHERE ${clause} ORDER BY created_at`;\n  await sql.unsafe(stmt);\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "plusEqualsPaginationLimit",
+    "code": "async function pagedFeed(limit: number, offset: number) {\n  let q = \"SELECT * FROM feed\";\n  q += \" LIMIT \" + limit + \" OFFSET \" + offset;\n  const rows = await pool.query(q);\n  return rows.rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "concatMultiConditionBooking",
+    "code": "async function findBooking(room: string, date: string) {\n  const q = \"SELECT * FROM bookings WHERE room = '\" + room + \"' AND date = '\" + date + \"'\";\n  const rows = await client.query(q);\n  return rows.rows;\n}",
+    "expect_flag": true
+  },
+  {
+    "name": "untaggedTemplateToDbQuery",
+    "code": "async function auditByActor(actor: string) {\n  const text = `SELECT * FROM audit WHERE actor = '${actor}'`;\n  const rows = await db.query(text);\n  return rows;\n}",
+    "expect_flag": true
+  }
+]

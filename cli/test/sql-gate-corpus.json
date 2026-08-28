@@ -1,0 +1,278 @@
+[
+  {
+    "name": "WHERE simples com bind — sql tagged, 1 interpolacao SEGURA",
+    "code": "const user = await sql`SELECT id, email FROM users WHERE id = ${userId}`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "LIKE com valor montado em JS mas passado como bind unico — SEGURO",
+    "code": "const term = search.trim();\nconst rows = await sql`SELECT id, name FROM products WHERE name ILIKE ${'%' + term + '%'} ORDER BY name`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "IN via ANY(array) — postgres.js parametriza o array inteiro — SEGURO",
+    "code": "const statuses = ['open', 'pending', 'paid'];\nconst rows = await sql`SELECT * FROM orders WHERE status = ANY(${statuses}) AND tenant_id = ${tenantId}`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "IN via helper sql(ids) — expansao parametrizada, nao concatenacao — SEGURO",
+    "code": "const ids = req.body.ids as number[];\nconst rows = await sql`SELECT * FROM users WHERE id IN ${sql(ids)}`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "INSERT INTO ... VALUES com binds posicionais — SEGURO",
+    "code": "await sql`INSERT INTO audit_logs (user_id, action, ip) VALUES (${userId}, ${action}, ${ip})`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "INSERT via helper sql(obj, cols) — colunas/valores parametrizados — SEGURO",
+    "code": "const newUser = { name, email, role };\nconst [created] = await sql`INSERT INTO users ${sql(newUser, 'name', 'email', 'role')} RETURNING *`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "UPDATE SET com helper sql(patch) + WHERE bind — SEGURO",
+    "code": "const patch = { name: body.name, updated_at: new Date() };\nawait sql`UPDATE profiles SET ${sql(patch, 'name', 'updated_at')} WHERE id = ${id}`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "ctx.sql multiline (repository pattern) — tagged com bind — SEGURO",
+    "code": "async function getInvoices(ctx: DbCtx, customerId: string) {\n  return await ctx.sql`\n    SELECT *\n    FROM invoices\n    WHERE customer_id = ${customerId}\n      AND status = 'open'\n    ORDER BY created_at DESC\n  `;\n}",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "Template literal ANINHADO dentro da interpolacao do sql — crase dentro de ${} — SEGURO (bind unico)",
+    "code": "const prefix = 'acct';\nconst rows = await sql`SELECT * FROM accounts WHERE handle = ${`${prefix}_${slug}_${region}`}`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "Fragmentos sql condicionais encadeados (composicao de tagged templates) — SEGURO",
+    "code": "const activeClause = onlyActive ? sql`AND active = true` : sql``;\nconst roleClause = role ? sql`AND role = ${role}` : sql``;\nconst rows = await sql`SELECT * FROM members WHERE org_id = ${orgId} ${activeClause} ${roleClause}`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "Conteudo do sql contem CRASE literal (escapada \\`) como texto — mais bind — SEGURO",
+    "code": "const rows = await sql`SELECT id, 'render \\`code\\` inline' AS hint FROM snippets WHERE lang = ${lang}`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "Conteudo do sql contem ${} literal (cifrao-chave escapado \\${}) como texto — SEGURO",
+    "code": "const rows = await sql`SELECT format('greeting: \\${name}') AS tpl FROM templates WHERE id = ${templateId}`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "Identificadores dinamicos via sql(cols)/sql(table) — escape de identificador, nao string raw — SEGURO",
+    "code": "const cols = ['id', 'email', 'created_at'];\nconst rows = await sql`SELECT ${sql(cols)} FROM ${sql(tableName)} WHERE tenant = ${tenant}`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "Paginacao LIMIT/OFFSET com binds numericos — SEGURO",
+    "code": "const page = await sql`\n  SELECT * FROM posts\n  WHERE author_id = ${authorId}\n  ORDER BY id DESC\n  LIMIT ${limit} OFFSET ${offset}\n`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "JOIN multiline com dois binds — tagged sql — SEGURO",
+    "code": "const rows = await sql`\n  SELECT u.id, p.title\n  FROM users u\n  JOIN posts p ON p.author_id = u.id\n  WHERE u.tenant_id = ${tenantId}\n    AND p.published = ${published}\n`;",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "ctx.sql em transacao (sql.begin) com ternario encadeado na interpolacao — SEGURO",
+    "code": "await sql.begin(async (ctx) => {\n  const weight = level === 'hi' ? 3 : level === 'mid' ? 2 : 1;\n  await ctx.sql`UPDATE tasks SET priority = ${weight} WHERE id = ${taskId}`;\n  await ctx.sql`INSERT INTO task_events (task_id, kind) VALUES (${taskId}, ${'reprioritized'})`;\n});",
+    "expect_flag": false,
+    "cat": "safe"
+  },
+  {
+    "name": "WHERE concat aspas+var em .unsafe() — string montada por concatenacao",
+    "code": "async function getUser(db: Sql, email: string) {\n  const q = \"SELECT id, name FROM users WHERE email = '\" + email + \"'\";\n  return db.unsafe(q);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "INSERT VALUES concatenado com aspas em .unsafe()",
+    "code": "function insertLog(sql: Sql, userId: string, action: string) {\n  const query =\n    \"INSERT INTO audit_log (user_id, action) VALUES ('\" +\n    userId + \"', '\" + action + \"')\";\n  return sql.unsafe(query);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "UPDATE SET concatenado passado a pool.query()",
+    "code": "async function updateName(pool: Pool, id: number, name: string) {\n  const stmt =\n    \"UPDATE profiles SET display_name = '\" + name + \"' WHERE id = \" + id;\n  return pool.query(stmt);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "WHERE — template NAO-taggeado (sem sql antes da crase) em .unsafe()",
+    "code": "async function findByStatus(sql: Sql, status: string) {\n  return sql.unsafe(`SELECT id, title FROM orders WHERE status = '${status}'`);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "LIKE %term% — template nao-taggeado em pool.query()",
+    "code": "const search = async (pool: Pool, term: string) => {\n  return pool.query(`SELECT * FROM products WHERE name ILIKE '%${term}%'`);\n};",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "WHERE numerico — template nao-taggeado em client.query()",
+    "code": "async function del(client: PoolClient, id: number) {\n  await client.query(`DELETE FROM sessions WHERE id = ${id}`);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "LIKE prefixo concatenado com aspas em .unsafe()",
+    "code": "function suggest(sql: Sql, prefix: string) {\n  const q = \"SELECT city FROM municipios WHERE city LIKE '\" + prefix + \"%'\";\n  return sql.unsafe(q);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "IN (...) via ids.join() interpolado em template nao-taggeado",
+    "code": "async function byIds(sql: Sql, ids: number[]) {\n  const list = ids.join(\",\");\n  return sql.unsafe(`SELECT * FROM invoices WHERE id IN (${list})`);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "FROM nome de tabela dinamico concatenado em .unsafe()",
+    "code": "function dump(sql: Sql, tableName: string) {\n  return sql.unsafe(\"SELECT * FROM \" + tableName + \" LIMIT 100\");\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "ORDER BY coluna dinamica — template nao-taggeado em .query()",
+    "code": "async function listSorted(db: Sql, column: string) {\n  return db.query(`SELECT * FROM employees ORDER BY ${column} DESC`);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "WHERE — template nao-taggeado passado a .execute()",
+    "code": "async function runReport(conn: Connection, region: string) {\n  return conn.execute(`SELECT sum(total) FROM sales WHERE region = '${region}'`);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "Auth bypass — dupla concatenacao user+pass com aspas em .unsafe()",
+    "code": "function auth(sql: Sql, user: string, pass: string) {\n  const query =\n    \"SELECT * FROM accounts WHERE username = '\" + user +\n    \"' AND password = '\" + pass + \"'\";\n  return sql.unsafe(query);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "INSERT VALUES montado por += (acumulo de string) em .unsafe()",
+    "code": "async function addProduct(sql: Sql, name: string, price: string) {\n  let query = \"INSERT INTO products (name, price) VALUES (\";\n  query += \"'\" + name + \"', \" + price + \")\";\n  return sql.unsafe(query);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "UPDATE SET — template nao-taggeado em pool.query()",
+    "code": "async function setRole(pool: Pool, role: string, userId: string) {\n  return pool.query(`UPDATE users SET role = '${role}' WHERE id = '${userId}'`);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "IN (...) via map+join de aspas em template nao-taggeado (client.query)",
+    "code": "async function fetchTags(client: PoolClient, tags: string[]) {\n  const inList = tags.map((t) => `'${t}'`).join(\",\");\n  return client.query(`SELECT * FROM posts WHERE tag IN (${inList})`);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "FROM schema.tabela dinamico concatenado em .unsafe()",
+    "code": "function crossJoin(sql: Sql, schema: string, table: string) {\n  const q =\n    \"SELECT * FROM \" + schema + \".\" + table + \" WHERE deleted = false\";\n  return sql.unsafe(q);\n}",
+    "expect_flag": true,
+    "cat": "unsafe"
+  },
+  {
+    "name": "tag sql quebrada em linha antes da crase — JS permite whitespace/newline entre tag e template, continua tagged = bind SEGURO; quebra regex que exige sql` na mesma linha",
+    "code": "const userId = req.params.id;\nconst rows = await sql\n  `SELECT id, name FROM users WHERE id = ${userId}`;\nreturn rows;",
+    "expect_flag": false,
+    "cat": "tricky"
+  },
+  {
+    "name": "crase ESCAPADA (\\`) dentro do template tagged — engana regex que casa a crase de fechamento cedo e acha que ${id} ficou fora; ainda e sql tagged = SEGURO",
+    "code": "const id = ctx.params.id;\nconst rows = await sql`SELECT '\\`' || name AS quoted FROM t WHERE id = ${id}`;\nreturn rows;",
+    "expect_flag": false,
+    "cat": "tricky"
+  },
+  {
+    "name": "sql`...` aparece DENTRO de uma string literal normal (hint) — nao pode tornar o concat vizinho seguro; o concat com userName e a vuln real = INSEGURO",
+    "code": "const hint = \"use sql`SELECT ...${x}` em vez de concatenar\";\nconst query = \"SELECT * FROM users WHERE name = '\" + userName + \"'\";\nconst rows = await pool.query(query);\nreturn rows;",
+    "expect_flag": true,
+    "cat": "tricky"
+  },
+  {
+    "name": "COMENTARIO contendo sql`...${v}...` como exemplo bom — o codigo real e concat de variaveis; comentario nao deve neutralizar a deteccao = INSEGURO",
+    "code": "// GOOD: sql`UPDATE t SET x = ${v} WHERE id = ${id}`\nconst q = \"UPDATE accounts SET balance = balance + \" + amount + \" WHERE id = \" + accId;\nawait client.query(q);",
+    "expect_flag": true,
+    "cat": "tricky"
+  },
+  {
+    "name": "templates profundamente aninhados na interpolacao de um sql tagged — crases internas confundem o matcher, mas tudo vira bind param = SEGURO",
+    "code": "const rows = await sql`SELECT * FROM events WHERE label = ${`${prefix}-${inner}-${suffix}`} AND ts > ${since}`;\nreturn rows;",
+    "expect_flag": false,
+    "cat": "tricky"
+  },
+  {
+    "name": "concat REAL na MESMA linha fisica de um sql`SELECT now()` nao-relacionado — detector por-linha ve o sql` e limpa a linha inteira; o concat com host e INSEGURO",
+    "code": "const ok = await sql`SELECT now()`; const bad = \"SELECT * FROM u WHERE h='\" + host + \"'\"; await pool.query(bad);",
+    "expect_flag": true,
+    "cat": "tricky"
+  },
+  {
+    "name": "concatenacao de string DENTRO da interpolacao ${} de um sql tagged — o valor concatenado ainda e passado como bind param, portanto SEGURO apesar do + com aspas perto de sql",
+    "code": "const rows = await sql`SELECT * FROM users WHERE email = ${'user_' + userId + '@corp.com'}`;\nreturn rows;",
+    "expect_flag": false,
+    "cat": "tricky"
+  },
+  {
+    "name": "template literal NAO-taggeado (crase sem sql antes) atribuido a q e passado a pool.query — interpolacao entra crua na string, sem bind = INSEGURO",
+    "code": "const q = `SELECT * FROM orders WHERE customer = ${customerId}`;\nawait pool.query(q);",
+    "expect_flag": true,
+    "cat": "tricky"
+  },
+  {
+    "name": "sql.unsafe(`...${tableName}...`) — o token sql aparece mas a crase e taggeada por NADA (arg de unsafe), interpolacao vira string crua = INSEGURO",
+    "code": "await sql.unsafe(`SELECT * FROM ${tableName} WHERE status = ${status}`);",
+    "expect_flag": true,
+    "cat": "tricky"
+  },
+  {
+    "name": "variavel chamada rawSql (substring 'sql' e red herring) recebe concat de aspas+variavel e vai pra sql.unsafe = INSEGURO",
+    "code": "let rawSql = \"DELETE FROM sessions WHERE token = '\" + token + \"'\";\nawait sql.unsafe(rawSql);",
+    "expect_flag": true,
+    "cat": "tricky"
+  },
+  {
+    "name": "ctx.sql`...${ownerId}...` — tag por member-access explicitamente coberta pela regra, bind = SEGURO; quebra regex que so casa \\bsql` e ignora o ponto",
+    "code": "const rows = await ctx.sql`SELECT * FROM tenants WHERE owner = ${ownerId} AND active = ${true}`;\nreturn rows;",
+    "expect_flag": false,
+    "cat": "tricky"
+  },
+  {
+    "name": "template NAO-taggeado passado a pool.query mas com ZERO interpolacoes (string estatica) — sem vetor de injecao = SEGURO; pega heuristica 'template nao-tagged em query => flag' que da falso-positivo",
+    "code": "const rows = await pool.query(`SELECT COUNT(*) FROM audit_log`);\nreturn rows;",
+    "expect_flag": false,
+    "cat": "tricky"
+  },
+  {
+    "name": "concatenacao com + porem SO de literais de string (sem nenhuma variavel/entrada) passada a client.query — nao ha interpolacao de dado = SEGURO; pega heuristica 'aspas + concat => flag'",
+    "code": "const q = \"SELECT * FROM \" + \"audit_log\" + \" ORDER BY ts DESC LIMIT 100\";\nawait client.query(q);",
+    "expect_flag": false,
+    "cat": "tricky"
+  },
+  {
+    "name": "helpers sql() aninhados na interpolacao (sql(columns), sql(ids)) dentro do sql tagged — fragmento/array parametrizado do postgres.js, parenteses internos confundem o parser mas e bind = SEGURO",
+    "code": "const rows = await sql`SELECT ${sql(columns)} FROM users WHERE id IN ${sql(ids)} AND role = ${role}`;\nreturn rows;",
+    "expect_flag": false,
+    "cat": "tricky"
+  }
+]

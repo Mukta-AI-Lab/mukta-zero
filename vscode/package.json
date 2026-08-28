@@ -1,0 +1,89 @@
+{
+  "name": "mukta-zero",
+  "displayName": "Mukta Zero",
+  "version": "0.4.0",
+  "private": true,
+  "description": "VS Code MVP that exposes the Mukta Zero agents (login / ask / cyber-defense review) as editor commands, reusing the proven mz-cli core (user-JWT only, never service-role).",
+  "publisher": "mukta",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onCommand:mz.login",
+    "onCommand:mz.ask",
+    "onCommand:mz.review",
+    "onCommand:mz.agent",
+    "onView:muktaZero.panel"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "mz.login",
+        "title": "Mukta: Login"
+      },
+      {
+        "command": "mz.ask",
+        "title": "Mukta: Ask Agent"
+      },
+      {
+        "command": "mz.review",
+        "title": "Mukta: Review Current File (cyber-defense)"
+      },
+      {
+        "command": "mz.agent",
+        "title": "Mukta: Agent Edit (self-edit current file)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "muktaZero",
+          "title": "Mukta Zero",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "muktaZero": [
+        {
+          "id": "muktaZero.panel",
+          "name": "Mukta Zero",
+          "type": "webview"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build:extension": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=dist/extension.js",
+    "build:diagnostics": "esbuild src/diagnostics.ts --bundle --platform=neutral --format=esm --outfile=dist/diagnostics.mjs",
+    "build": "npm run typecheck && npm run build:extension && npm run build:diagnostics",
+    "test:diagnostics": "npm run build:diagnostics && node test/diagnostics.test.mjs",
+    "test:activation": "npm run build && node test/runTest.cjs",
+    "test:window": "node test/window.test.mjs",
+    "test:wiring": "node test/panel-wiring.test.mjs",
+    "test:icon": "node test/icon-geometry.test.mjs",
+    "test:offline": "npm run typecheck && npm run test:wiring && npm run test:icon && npm run test:window",
+    "preview": "node test/panel-preview.mjs"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "glob": "^13.0.6",
+    "mocha": "^11.7.6",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/H3rb-Mukta/mukta-ai"
+  }
+}

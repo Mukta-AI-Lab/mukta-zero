@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; style-src %%CSP_SOURCE%% 'unsafe-inline'; script-src 'nonce-%%NONCE%%'; font-src %%CSP_SOURCE%%; img-src %%CSP_SOURCE%%;"
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="%%STYLE_URI%%" />
+  <title>Mukta Zero</title>
+</head>
+<body>
+  <!--
+    A JANELA do Mukta Zero. Mesma estrutura da janela do terminal (`mz`), nas
+    affordances do editor: barra de abas em cima, transcript no meio, chips de
+    anexo + caixa de pedido embaixo, barra de estado com o MODO no rodapé.
+    Todo o conteúdo dinâmico é criado em panel.js via textContent/createElement —
+    nunca innerHTML — então nada vindo do modelo ou de um diff vira markup.
+  -->
+  <div class="mz-window">
+
+    <nav class="mz-tabbar" id="tabbar" aria-label="Abas de execução"></nav>
+
+    <!--
+      NÃO existe formulário de login aqui, de propósito. A conta é operada pelo
+      botão do usuário no RODAPÉ, que abre os diálogos NATIVOS do VS Code
+      (QuickPick + InputBox com password:true). Além de ser o componente que o
+      usuário já conhece, isso tira a senha do webview: ela vai do diálogo do
+      editor direto para o login, sem passar pelo processo da página.
+    -->
+    <div class="mz-transcript" id="transcript" tabindex="0"></div>
+
+    <div class="mz-approve mz-hidden" id="approve">
+      <div class="mz-approve-head">
+        Aplicar a mudança em <strong id="approve-file"></strong>?
+      </div>
+      <pre class="mz-diff" id="approve-diff"></pre>
+      <div class="mz-row">
+        <button class="mz-btn" id="approve-yes" type="button">Aplicar</button>
+        <button class="mz-btn mz-btn-2" id="approve-no" type="button">Pular</button>
+      </div>
+    </div>
+
+    <div class="mz-chips" id="chips"></div>
+
+    <div class="mz-popup mz-hidden" id="popup">
+      <div class="mz-popup-title" id="popup-title"></div>
+      <ul class="mz-popup-list" id="popup-list"></ul>
+      <div class="mz-popup-foot">↑↓ navega · Tab completa · Enter usa · Esc fecha</div>
+    </div>
+
+    <div class="mz-composer">
+      <div class="mz-composer-tools">
+        <button class="mz-tool" id="tool-attach" type="button" title="Anexar contexto (+)">+</button>
+        <button class="mz-tool" id="tool-file" type="button" title="Referenciar arquivo (@)">@</button>
+        <button class="mz-tool" id="tool-slash" type="button" title="Comandos (/)">/</button>
+        <button class="mz-tool mz-tool-editor" id="tool-editor" type="button" title="Anexar o arquivo aberto no editor">arquivo atual</button>
+        <span class="mz-spacer"></span>
+        <button class="mz-tool mz-tool-stop mz-hidden" id="tool-stop" type="button" title="Cancelar (Esc)">parar</button>
+      </div>
+      <textarea class="mz-textarea" id="input" rows="3"
+        placeholder="Escreva o pedido · / comandos · @ arquivos · + anexos · ! shell"></textarea>
+      <div class="mz-row">
+        <button class="mz-btn" id="send" type="button">Enviar</button>
+        <span class="mz-running mz-hidden" id="running"></span>
+      </div>
+    </div>
+
+    <footer class="mz-status">
+      <button class="mz-mode" id="mode" type="button" title="Trocar o modo de execução (Ctrl+Enter)"></button>
+      <span class="mz-status-sep">│</span>
+      <button class="mz-user" id="status-user" type="button" title="Conta Mukta — entrar ou sair"></button>
+      <span class="mz-status-sep">│</span>
+      <span id="status-ws"></span>
+      <span class="mz-spacer"></span>
+      <span class="mz-status-hint" id="status-hint"></span>
+    </footer>
+  </div>
+
+  <script nonce="%%NONCE%%" src="%%SCRIPT_URI%%"></script>
+</body>
+</html>

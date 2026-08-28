@@ -1,0 +1,155 @@
+# Copyright (c) 2026 Mukta Solucoes em Informatica Ltda.
+# SPDX-License-Identifier: BUSL-1.1
+#
+# Use of this software is governed by the Business Source License 1.1
+# included in the repository LICENSE file. Change License: AGPL-3.0-only
+# Mukta Zero - https://github.com/mukta-ai-lab/mukta-zero
+x-logging: &dl
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+services:
+  db:
+    image: supabase/postgres:17.6.1.139
+    container_name: mz-db
+    restart: unless-stopped
+    logging: *dl
+    command: ["postgres","-c","config_file=/etc/postgresql/postgresql.conf"]
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXP: ${JWT_EXP:-3600}
+    volumes:
+      - ./data/db:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    ports: ["127.0.0.1:5432:5432"]
+    healthcheck:
+      test: ["CMD","pg_isready","-U","postgres","-h","localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks: [sb]
+  auth:
+    image: supabase/gotrue:v2.177.0
+    container_name: mz-auth
+    restart: unless-stopped
+    logging: *dl
+    depends_on: { db: { condition: service_healthy } }
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      GOTRUE_SITE_URL: ${SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: ${ADDITIONAL_REDIRECT_URLS}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_EXP: ${JWT_EXP:-3600}
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_ISSUER: ${JWT_ISSUER:-supabase}
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: "false"
+    networks: [sb]
+  rest:
+    image: postgrest/postgrest:v12.2.8
+    container_name: mz-rest
+    restart: unless-stopped
+    logging: *dl
+    depends_on: { db: { condition: service_healthy } }
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: ${PGRST_DB_SCHEMAS:-public,storage,graphql_public}
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+    networks: [sb]
+  storage:
+    image: supabase/storage-api:v1.19.3
+    container_name: mz-storage
+    restart: unless-stopped
+    logging: *dl
+    depends_on:
+      db: { condition: service_healthy }
+      rest: { condition: service_started }
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: stub
+      GLOBAL_S3_BUCKET: stub
+    volumes: ["./data/storage:/var/lib/storage"]
+    networks: [sb]
+  realtime:
+    image: supabase/realtime:v2.34.47
+    container_name: mz-realtime
+    restart: unless-stopped
+    logging: *dl
+    depends_on: { db: { condition: service_healthy } }
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: postgres
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_ENC_KEY: ${REALTIME_ENC_KEY}
+      API_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      APP_NAME: realtime
+      RLIMIT_NOFILE: "10000"
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+    networks: [sb]
+  meta:
+    image: supabase/postgres-meta:v0.84.2
+    container_name: mz-meta
+    restart: unless-stopped
+    logging: *dl
+    depends_on: { db: { condition: service_healthy } }
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+    networks: [sb]
+  edge-runtime:
+    build: { context: ., dockerfile: Dockerfile.edge }
+    image: mukta-edge-runtime:1.0
+    container_name: mz-edge
+    restart: unless-stopped
+    logging: *dl
+    depends_on: { db: { condition: service_healthy } }
+    environment:
+      PGURL: postgres://supabase_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      EDGE_PORT: 9000
+    volumes: ["./functions:/functions"]
+    networks: [sb]
+  kong:
+    image: kong:2.8.1
+    container_name: mz-kong
+    restart: unless-stopped
+    logging: *dl
+    depends_on: [auth, rest, storage, realtime, edge-runtime]
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl
+    volumes: ["./kong/kong.yml:/home/kong/kong.yml:ro"]
+    ports: ["0.0.0.0:8000:8000"]
+    networks: [sb]
+networks:
+  sb: { name: mukta-sb, driver: bridge }

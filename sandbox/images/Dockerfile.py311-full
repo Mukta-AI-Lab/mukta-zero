@@ -1,0 +1,39 @@
+# mukta/code-exec-py:3.11-full — MESMO stack, Python 3.11.
+#
+# PORQUÊ UMA SEGUNDA IMAGEM, e não só a 3.12: parte do corpus do BigCodeBench foi construída em
+# Python ≤3.11, e duas coisas quebram em 3.12:
+#   1. `assertAlmostEquals` (e outros aliases de unittest) foram REMOVIDOS em 3.12 — a suíte não
+#      corre. Medido: 5 tarefas do corpus usam aliases removidos
+#   2. o algoritmo de `random.sample`/`shuffle` mudou — expectativas com semente fixa geradas em
+#      ≤3.11 NÃO se reproduzem em 3.12. Medido: 14 variantes testadas na /365 e /117, nenhuma bate
+#
+# ⚠️ DUAS SUPERFÍCIES DE MEDIÇÃO É UM CUSTO, e declara-se: a partir daqui **todo resultado tem de
+# dizer em que imagem correu**. O carimbo M6 já grava o digest do ambiente — é ele que distingue,
+# e comparar números de imagens diferentes sem o declarar é a classe de defeito que este projecto
+# passou dois dias a corrigir.
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential libgomp1 libgl1 libglib2.0-0 tesseract-ocr libsndfile1 \
+      libgeos-dev libproj-dev proj-data proj-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+      numpy pandas scipy scikit-learn matplotlib seaborn statsmodels \
+      requests django flask opencv-python-headless nltk pillow faker psutil
+
+RUN pip install --no-cache-dir \
+      wikipedia sendgrid python_http_client geopandas shapely soundfile librosa \
+      gensim wordninja pytesseract tensorflow-cpu keras
+
+# ⚠️ PYTHONSAFEPATH=1 — sem isto o `nltk` RECUSA importar (bloqueia modulos do CWD por seguranca)
+# e 32 tarefas do corpus que o usam falhariam com um ImportError lido como falha do modelo.
+# ⚠️ TF_CPP_MIN_LOG_LEVEL=3 — o tensorflow escreve avisos do oneDNN no STDERR de TODA execucao, e
+# o verificador le o stderr para detectar falha. Ruido de biblioteca no canal de erro e a forma
+# mais barata de fabricar um falso negativo.
+ENV HOME=/tmp MPLBACKEND=Agg PYTHONDONTWRITEBYTECODE=1 PYTHONSAFEPATH=1 TF_CPP_MIN_LOG_LEVEL=3 TF_ENABLE_ONEDNN_OPTS=0 KERAS_BACKEND=tensorflow
+
+# ⚠️ WORKDIR /tmp — com o CWD em `/` o guard interno do nltk RECUSA importar (bloqueia modulos
+# do diretorio corrente). Medido: mesma imagem, `-w /tmp` importa, `/` nao. E /tmp e o unico
+# ponto escrivel do sandbox, logo e onde o codigo do benchmark ja espera trabalhar.
+WORKDIR /tmp

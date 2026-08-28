@@ -1,0 +1,205 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   FUNDAÇÃO DE DESIGN DO MUKTA ZERO
+
+   Duas correções estruturais que fazem as 18 telas melhorarem sem serem tocadas,
+   porque quase todas já usam classes de TOKEN (bg-card, text-muted-foreground,
+   border-border) — mudar o valor do token muda a tela inteira:
+
+   1) O token contradizia o uso. `--primary` era MARROM (24 45% 26%) enquanto todo
+      componente hardcodava `teal-*`. Resultado visível: o botão "Criar persona"
+      (bg-primary) saía marrom no meio de uma UI teal. O teal é a marca de fato —
+      passa a SER o primary. O marrom fica como acento quente (`--brand-warm`),
+      disponível mas não no caminho principal.
+
+   2) A LADDER DE SUPERFÍCIE não existia. No escuro, `--background` 5% e `--card` 7%
+      ficavam 2pp apart: separação invisível, tudo achatado num breu só. Agora há
+      três degraus reais (página → superfície → elevado) nos dois temas, que é o que
+      dá profundidade sem depender de sombra.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Página → superfície → elevado (3 degraus reais) */
+  --background: 210 20% 98%;
+  --foreground: 222 22% 11%;
+  --surface: 0 0% 100%;
+  --surface-2: 210 20% 96%;
+  --card: 0 0% 100%; --card-foreground: 222 22% 11%;
+  --popover: 0 0% 100%; --popover-foreground: 222 22% 11%;
+
+  /* Teal = a marca de fato, agora também o token */
+  --primary: 175 84% 30%; --primary-foreground: 0 0% 100%;
+  --primary-hover: 175 84% 25%;
+  --primary-soft: 172 60% 95%;          /* fundo de estado selecionado (claro) */
+  --accent: 175 84% 30%; --accent-foreground: 0 0% 100%;
+  --brand-warm: 24 45% 26%;             /* marrom Mukta — acento, não caminho principal */
+
+  --secondary: 210 20% 96%; --secondary-foreground: 222 22% 11%;
+  --muted: 210 20% 96%; --muted-foreground: 215 16% 42%;
+  --destructive: 0 72% 45%; --destructive-foreground: 0 0% 100%;
+  --success: 160 84% 32%;
+  --warning: 32 95% 44%;
+
+  /* Marca do Mukta Zero: anel/pilares em cinza, seta na cor da marca (marrom Mukta) */
+  --mark-frame: 0 0% 64%;
+  --mark-arrow: 24 45% 26%;
+
+  --border: 214 20% 89%;
+  --border-strong: 214 16% 80%;
+  --input: 214 20% 89%;
+  --ring: 175 84% 30%;
+  --radius: 0.625rem;
+
+  /* Sombras discretas — a profundidade vem da ladder, não de drop shadow forte */
+  --ui-shadow-card: 0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06);
+  --ui-shadow-popup: 0 4px 6px -2px rgba(16,24,40,.03), 0 12px 16px -4px rgba(16,24,40,.08);
+  --ui-shadow-modal: 0 8px 8px -4px rgba(16,24,40,.03), 0 20px 24px -4px rgba(16,24,40,.10);
+  --ui-shadow-composer: 0 2px 4px -2px rgba(16,24,40,.06), 0 8px 16px -6px rgba(16,24,40,.08);
+}
+
+.dark {
+  --background: 220 16% 7%;
+  --foreground: 210 20% 96%;
+  --surface: 220 14% 10%;
+  --surface-2: 220 13% 14%;
+  --card: 220 14% 10%; --card-foreground: 210 20% 96%;
+  --popover: 220 13% 13%; --popover-foreground: 210 20% 96%;
+
+  /* No escuro o teal-600 fica abafado: sobe para a faixa 400/500 (contraste AA no texto) */
+  --primary: 172 66% 45%; --primary-foreground: 220 20% 8%;
+  --primary-hover: 172 66% 52%;
+  --primary-soft: 174 60% 14%;
+  --accent: 172 66% 45%; --accent-foreground: 220 20% 8%;
+  --brand-warm: 25 40% 62%;
+
+  --secondary: 220 13% 15%; --secondary-foreground: 210 20% 96%;
+  --muted: 220 13% 15%; --muted-foreground: 215 14% 65%;
+  --destructive: 0 62% 52%; --destructive-foreground: 0 0% 100%;
+  --success: 160 60% 45%;
+  --warning: 32 85% 58%;
+
+  /* No escuro a marca é inteiramente branca (variante que o Herbert passou) */
+  --mark-frame: 0 0% 100%;
+  --mark-arrow: 0 0% 100%;
+
+  --border: 220 10% 20%;
+  --border-strong: 220 10% 28%;
+  --input: 220 10% 22%;
+  --ring: 172 66% 45%;
+
+  --ui-shadow-card: 0 1px 2px rgba(0,0,0,.4);
+  --ui-shadow-popup: 0 12px 24px -6px rgba(0,0,0,.6);
+  --ui-shadow-modal: 0 20px 40px -8px rgba(0,0,0,.7);
+  --ui-shadow-composer: 0 8px 24px -8px rgba(0,0,0,.55);
+}
+
+@layer base {
+  * { border-color: hsl(var(--border)); }
+  html, body, #root { height: 100%; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: Inter, system-ui, sans-serif;
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: 0;
+  }
+  /* Escala tipográfica com hierarquia real (antes: tudo text-sm/text-2xl sem ritmo) */
+  h1 { font-weight: 650; letter-spacing: -0.021em; }
+  h2, h3 { font-weight: 600; letter-spacing: -0.017em; }
+  h4, h5, h6 { font-weight: 600; letter-spacing: -0.011em; }
+
+  /* Foco visível consistente — antes cada componente inventava o seu */
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+  ::selection { background: hsl(var(--primary) / .22); }
+
+  /* Scrollbar que não grita, e que existe no escuro (antes ficava branca) */
+  * { scrollbar-width: thin; scrollbar-color: hsl(var(--border-strong)) transparent; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border-strong));
+    border-radius: 99px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background-color: hsl(var(--muted-foreground) / .5); background-clip: content-box; }
+}
+
+@layer components {
+  /* Painel = a superfície padrão do app shell. Flush, separado por 1px, não flutuando. */
+  .panel {
+    background-color: hsl(var(--surface));
+    border-color: hsl(var(--border));
+  }
+
+  /* Item de navegação do rail — um só lugar define o estado ativo/hover. */
+  .nav-item {
+    @apply flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors;
+    color: hsl(var(--muted-foreground));
+  }
+  .nav-item:hover { background-color: hsl(var(--surface-2)); color: hsl(var(--foreground)); }
+  .nav-item[aria-current="page"] {
+    background-color: hsl(var(--primary-soft));
+    color: hsl(var(--primary));
+    font-weight: 600;
+  }
+
+  /* Medida de leitura: relatórios do MZ são longos; 74ch é a faixa legível. */
+  .reading-measure { max-width: 74ch; }
+}
+
+/* Tipografia do markdown do agente — o MZ entrega relatórios, não frases soltas.
+   Sem isto, tabelas e blocos de código do prose ficam sem respiro e sem borda no escuro. */
+@layer utilities {
+  .prose-mz {
+    @apply prose prose-sm max-w-none dark:prose-invert;
+  }
+  .prose-mz :where(p):not(:where([class~="not-prose"] *)) { margin-block: 0.6em; }
+  .prose-mz :where(h1,h2,h3,h4):not(:where([class~="not-prose"] *)) { margin-top: 1.3em; margin-bottom: 0.5em; }
+  .prose-mz :where(pre):not(:where([class~="not-prose"] *)) {
+    background-color: hsl(var(--surface-2));
+    color: hsl(var(--foreground));
+    border: 1px solid hsl(var(--border));
+    border-radius: 0.625rem;
+    overflow-x: auto;
+  }
+  .prose-mz :where(code):not(:where(pre code)):not(:where([class~="not-prose"] *)) {
+    background-color: hsl(var(--surface-2));
+    border: 1px solid hsl(var(--border));
+    border-radius: 0.3rem;
+    padding: 0.1em 0.35em;
+    font-weight: 500;
+  }
+  .prose-mz :where(code)::before, .prose-mz :where(code)::after { content: "" !important; }
+  .prose-mz :where(table):not(:where([class~="not-prose"] *)) { display: block; overflow-x: auto; font-size: 0.875em; }
+  .prose-mz :where(th):not(:where([class~="not-prose"] *)) {
+    background-color: hsl(var(--surface-2));
+    border-bottom: 1px solid hsl(var(--border-strong));
+  }
+  .prose-mz :where(td, th):not(:where([class~="not-prose"] *)) { padding: 0.45em 0.7em; }
+  .prose-mz :where(a):not(:where([class~="not-prose"] *)) { color: hsl(var(--primary)); text-underline-offset: 2px; }
+  .prose-mz :where(blockquote):not(:where([class~="not-prose"] *)) {
+    border-left-color: hsl(var(--primary) / .4);
+    font-style: normal;
+    color: hsl(var(--muted-foreground));
+  }
+}
+
+/* Respeita a preferência de movimento reduzido (risco vestibular): neutraliza
+   animate-spin / animate-fade-in / typing-cursor e todas as transições. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

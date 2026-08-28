@@ -1,0 +1,79 @@
+# mukta/code-exec-py:3.12-union — imagem do sandbox G3 com o stack COMPLETO do BigCodeBench.
+#
+# ⚠️ O NOME DESTE ARQUIVO TEM DE BATER COM A TAG QUE ESTA EM USO. Construi esta imagem com a tag
+# 3.12-union e deixei o arquivo chamado Dockerfile.py312-full — nomes diferentes. Resultado:
+# um grep por "3.12-union" no repositorio inteiro devolvia ZERO ocorrencias em Dockerfile ou
+# compose, e ninguem conseguia partir do repositorio e chegar a imagem que corria na fronteira.
+# E o mesmo defeito que EU denunciei sobre a 3.12-sci — «nunca teve Dockerfile, e e por isso que
+# ninguem sabia o que continha» — recriado por mim NESTE arquivo, abaixo da frase que o denuncia.
+#
+# COMANDO CANONICO (a tag faz parte da receita, nao e detalhe de quem constroi):
+#   docker build -f Dockerfile.py312-union -t mukta/code-exec-py:3.12-union .
+#
+# ⚠️ CUSTO MEDIDO desta imagem, 2026-08-06: arranque de 152 s contra 32 s da 3.12-sci (4,75x).
+# Com o teto do guarda em 120 s, ela NAO ARRANCA a tempo — a fronteira deixa de medir. As 12
+# bibliotecas que ela acrescenta custam a capacidade de medir seja o que for.
+#
+# PORQUÊ: uma biblioteca ausente no sandbox aparece como `ModuleNotFoundError` no meio da suíte e
+# é lida como "o modelo falhou". Já aconteceu três vezes documentadas (31/07, que motivou a
+# `3.12-sci`; 04/08 na BigCodeBench/59 com `wikipedia`; e 05/08 — ver o aviso abaixo, que é o pior
+# dos três porque a causa fui eu). **Ambiente incompleto não produz erro de ambiente: produz um
+# placar mais baixo, atribuído ao modelo.**
+#
+# 🔴 A LIÇÃO QUE ESTE FICHEIRO EXISTE PARA NÃO SE REPETIR (2026-08-05)
+# A primeira versão desta imagem foi escrita a partir de uma auditoria do que FALTAVA no corpus:
+# 12 módulos, e anunciei-a como "a mesma coisa, mais 12 libs". Medi depois o outro sentido —
+# `comm -23` entre os dois `pip freeze` — e a troca tinha **REMOVIDO 47 pacotes** (pytz, openpyxl,
+# lxml, sympy, networkx, python-docx, scikit-image, toda a família Flask…). Saldo real: 96 → 93.
+# A `BigCodeBench/564` passou de FECHA a NÃO-MEDIDA e eu procurei a causa em três sítios errados
+# (a regra instrucional nova, o shim de aliases, o mutador) antes de correr a suíte crua e ler
+# `ModuleNotFoundError: No module named 'pytz'`.
+# **Uma auditoria de sentido único devolve sempre o número que agrada.** Por isso esta imagem é a
+# UNIÃO EXPLÍCITA: a lista da `3.12-sci` (obtida do seu `pip freeze`, porque essa imagem nasceu de
+# um build ad-hoc e nunca teve Dockerfile — é exatamente por isso que ninguém sabia o que continha)
+# mais os 12 medidos no corpus. Nenhum nome sai daqui sem ficar escrito que saiu.
+#
+# ⚠️ `tensorflow-cpu` e não `tensorflow`: satisfaz `import tensorflow` e `keras` sem arrastar o
+# stack CUDA, que aqui não tem GPU para usar. Cerca de um terço do tamanho, e a .77 está a 84% de
+# disco. É escolha declarada, não omissão. (E continua INUTILIZÁVEL sob `--memory=256m`: o import
+# leva SIGKILL 137. Fica instalado porque o teto de memória é decisão do Herbert, não minha.)
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential libgomp1 libgl1 libglib2.0-0 tesseract-ocr libsndfile1 \
+      libgeos-dev libproj-dev proj-data proj-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── BLOCO 1 · tudo o que a 3.12-sci tinha. NENHUM nome sai desta lista sem medição. ──────────────
+RUN pip install --no-cache-dir \
+      Django Faker Flask Flask-Login Flask-Mail Flask-RESTful Flask-WTF ImageIO Jinja2 \
+      Levenshtein MarkupSafe PyYAML RapidFuzz WTForms Werkzeug aniso8601 asgiref beautifulsoup4 \
+      blake3 blinker branca certifi cffi chardet charset-normalizer click contourpy cryptography \
+      cssselect cycler defusedxml et_xmlfile folium fonttools geographiclib geopy holidays \
+      html5lib idna itsdangerous joblib kiwisolver lazy-loader lxml matplotlib mechanize mpmath \
+      narwhals natsort networkx nltk numpy opencv-python-headless openpyxl packaging pandas patsy \
+      pillow prettytable psutil pyasn1 pycparser pycryptodome pyfakefs pyparsing pyquery \
+      python-Levenshtein python-dateutil python-docx pytz regex requests requests-mock rsa \
+      scikit-image scikit-learn scipy seaborn six soupsieve sqlparse statsmodels sympy textblob \
+      texttable threadpoolctl tifffile tqdm typing_extensions urllib3 wcwidth webencodings \
+      wordcloud xlwt xmltodict xyzservices
+
+# ── BLOCO 2 · os 12 que faltavam, medidos no corpus (auditoria de 04/08 sobre as 1140 tarefas) ───
+RUN pip install --no-cache-dir \
+      wikipedia sendgrid python_http_client geopandas shapely soundfile librosa \
+      gensim wordninja pytesseract tensorflow-cpu keras
+
+# HOME=/tmp porque o sistema de ficheiros é read-only excepto /tmp — sem isto o matplotlib tenta
+# escrever em /nonexistent/.config e polui o stderr de TODA a execução com um aviso que já foi
+# confundido com falha.
+# ⚠️ TF_CPP_MIN_LOG_LEVEL=3 — o tensorflow escreve avisos do oneDNN no STDERR de TODA execucao, e
+# o verificador le o stderr para detectar falha. Ruido de biblioteca no canal de erro e a forma
+# mais barata de fabricar um falso negativo.
+# ⚠️ PYTHONSAFEPATH=1 fica, mas NAO e ele que resolve o nltk (a hipotese obvia estava errada e o
+# teste custou uma execucao) — quem resolve e o WORKDIR abaixo.
+ENV HOME=/tmp MPLBACKEND=Agg PYTHONDONTWRITEBYTECODE=1 PYTHONSAFEPATH=1 TF_CPP_MIN_LOG_LEVEL=3 TF_ENABLE_ONEDNN_OPTS=0 KERAS_BACKEND=tensorflow
+
+# ⚠️ WORKDIR /tmp — com o CWD em `/` o guard interno do nltk RECUSA importar (bloqueia modulos
+# do diretorio corrente). Medido: mesma imagem, `-w /tmp` importa, `/` nao. E /tmp e o unico
+# ponto escrivel do sandbox, logo e onde o codigo do benchmark ja espera trabalhar.
+WORKDIR /tmp
