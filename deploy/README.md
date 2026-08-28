@@ -1,6 +1,3 @@
-<!-- Substitui o deploy/README.md HERDADO (que é interno: fala de /opt/mukta-zero-zero/stack, da .107 e
-     do MANIFEST). Copiado por cima dele em F1 — ver copy-manifest.tsv. -->
-
 # Self-hosting Mukta Zero
 
 This directory stands up the full platform: Postgres, auth (GoTrue), REST

@@ -1,7 +1,3 @@
-<!-- DRAFT (2026-08-25). Instruções de setup "AI-agent-ready": cada passo é um comando
-     determinístico com saída esperada verificável; um agente pode executar e se auto-calibrar
-     pelos gates. Os caminhos refletem a estrutura do MANIFEST.md; validar na fase F1. -->
-
 # Mukta Zero — Setup
 
 > **For AI agents**: execute the numbered steps in order. Each step has a

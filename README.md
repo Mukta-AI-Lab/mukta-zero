@@ -1,7 +1,3 @@
-<!-- DRAFT do README público (2026-08-25). Vira o README.md do repo mukta-ai-lab/mukta-zero
-     no commit inaugural (fase F3). Escrito "AI-agent-ready": seções com contratos explícitos,
-     comandos determinísticos e saídas esperadas — ver também SETUP.md. -->
-
 # Mukta Zero
 
 **An autonomous code-and-reasoning agent that does not trust itself.**
