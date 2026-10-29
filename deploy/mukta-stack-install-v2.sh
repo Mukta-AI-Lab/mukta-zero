@@ -269,6 +269,24 @@ CREATE OR REPLACE FUNCTION vault.set_secret(p_name text, p_value text) RETURNS v
   ON CONFLICT (name) DO UPDATE SET value_enc = excluded.value_enc, updated_at = now() $fn$;
 REVOKE ALL ON FUNCTION vault.set_secret(text, text) FROM PUBLIC;
 
+-- Logout revokes the token (external audit follow-up, 2026-10-29): PostgREST runs this before every request
+-- (PGRST_DB_PRE_REQUEST). A JWT whose session_id is no longer in auth.sessions gets 401. Tokens without
+-- session_id (service_role) pass. auth.sessions is created later by GoTrue; plpgsql resolves it at call time.
+-- VOLATILE on purpose: a STABLE function may be skipped by the planner when its result is unused.
+CREATE OR REPLACE FUNCTION public.mz_check_session() RETURNS void LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = '' AS $fn$
+DECLARE sid text := nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'session_id';
+BEGIN
+  IF sid IS NULL OR sid = '' THEN RETURN; END IF;
+  IF sid !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' OR NOT EXISTS (
+       SELECT 1 FROM auth.sessions s WHERE s.id = sid::uuid AND (s.not_after IS NULL OR s.not_after > now())) THEN
+    RAISE SQLSTATE 'PGRST' USING
+      message = '{"code":"MZ401","message":"session revoked","details":null,"hint":"sign in again"}',
+      detail  = '{"status":401,"headers":{"WWW-Authenticate":"Bearer error=\"invalid_token\""}}';
+  END IF;
+END $fn$;
+REVOKE ALL ON FUNCTION public.mz_check_session() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.mz_check_session() TO anon, authenticated, service_role;
+
 GRANT USAGE ON SCHEMA public, storage, graphql_public, extensions TO anon, authenticated, service_role;
 GRANT ALL ON SCHEMA storage TO supabase_storage_admin;
 ALTER ROLE authenticator SET search_path = public, extensions;
@@ -315,7 +333,8 @@ PGCONF
 # vs-Supabase differentiator: loads UNLIMITED secrets from vault.secrets and
 # exposes /__health (Kong routes :8000/__health here -> the pipeline contract).
 cat > "$STACK/functions/edge-runtime.ts" <<'TS'
-import postgres from "npm:postgres@3";
+// versão exata: o cache do Deno não é volume, então cada recriação do container baixa de novo (auditoria externa, 29/10)
+import postgres from "npm:postgres@3.4.9";
 const PGURL = Deno.env.get("PGURL")!;
 const PORT = Number(Deno.env.get("EDGE_PORT") ?? "9000");
 const sql = postgres(PGURL);
@@ -345,6 +364,32 @@ function sameToken(a: string, b: string): boolean {
 // Nomes que NÃO são edges: módulos internos (`_obs`, `_shared`) e o próprio runtime.
 const NOT_A_FUNCTION = /^(_|edge-runtime$)/;
 
+// Revogação no logout (auditoria externa, 29/10): o JWT do GoTrue (e o do CLI) carrega `session_id`, e o logout
+// apaga a linha em auth.sessions. Token cuja sessão não existe mais volta 401 aqui, antes de qualquer edge.
+// Token sem `session_id` (service_role, harness) segue para o verificador da edge. Cache curto por sessão.
+const SESSION_TTL_MS = 15_000;
+const sessionCache = new Map<string, { ok: boolean; at: number }>();
+function bearerSessionId(req: Request): string | null {
+  const h = req.headers.get("authorization") || "";
+  const p = h.startsWith("Bearer ") ? h.slice(7).split(".")[1] : "";
+  if (!p) return null;
+  try {
+    const c = JSON.parse(atob(p.replace(/-/g, "+").replace(/_/g, "/")));
+    return typeof c.session_id === "string" && c.session_id ? c.session_id : null;
+  } catch { return null; }
+}
+async function sessionAlive(sid: string): Promise<boolean> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sid)) return false;
+  const now = Date.now(), hit = sessionCache.get(sid);
+  if (hit && now - hit.at < SESSION_TTL_MS) return hit.ok;
+  const r = await sql`select 1 from auth.sessions where id = ${sid}::uuid and (not_after is null or not_after > now())`;
+  if (sessionCache.size > 5000) sessionCache.clear();
+  sessionCache.set(sid, { ok: r.length > 0, at: now });
+  return r.length > 0;
+}
+const authError = (status: number, error: string) =>
+  new Response(JSON.stringify({ error }), { status, headers: { "content-type": "application/json", "www-authenticate": 'Bearer error="invalid_token"' } });
+
 Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
   const url = new URL(req.url);
   if (url.pathname === "/__health" || url.pathname === "/functions/v1/__health") {
@@ -361,6 +406,15 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
   }
   const m = url.pathname.match(/^\/(?:functions\/v1\/)?([\w-]+)\/?$/);
   if (!m || NOT_A_FUNCTION.test(m[1])) return new Response("mukta edge runtime", { status: 200 });
+  const sid = req.method === "OPTIONS" ? null : bearerSessionId(req);
+  if (sid) {
+    try { if (!(await sessionAlive(sid))) return authError(401, "session_revoked"); }
+    catch (e) {
+      // sem banco não há como saber se a sessão vale: falha fechada
+      console.error("[mukta-edge] checagem de sessão falhou:", (e instanceof Error ? e.message : String(e)).slice(0, 200));
+      return authError(503, "session_check_unavailable");
+    }
+  }
   try {
     let mod = modCache.get(m[1]);
     if (!mod) { mod = await import("file:///functions/" + m[1] + ".ts"); modCache.set(m[1], mod); }
@@ -389,7 +443,7 @@ DOCKER
 
 # --- kong/kong.yml.tpl : declarative gateway (envsubst -> kong.yml) -----------
 cat > "$STACK/kong/kong.yml.tpl" <<'KONG'
-_format_version: "2.1"
+_format_version: "3.0"
 services:
   - name: auth-v1
     url: http://auth:9999/
@@ -505,6 +559,8 @@ services:
       PGRST_DB_ANON_ROLE: anon
       PGRST_JWT_SECRET: ${JWT_SECRET}
       PGRST_DB_USE_LEGACY_GUCS: "false"
+      # token de sessão encerrada (logout) volta 401 em toda requisição (função criada no init SQL)
+      PGRST_DB_PRE_REQUEST: public.mz_check_session
     networks: [sb]
   storage:
     image: supabase/storage-api:v1.19.3
@@ -576,7 +632,8 @@ services:
     volumes: ["./functions:/functions"]
     networks: [sb]
   kong:
-    image: kong:2.8.1
+    image: kong:3.9.1
+    ulimits: { nofile: { soft: 65536, hard: 65536 } }
     container_name: mz-kong
     restart: unless-stopped
     logging: *dl

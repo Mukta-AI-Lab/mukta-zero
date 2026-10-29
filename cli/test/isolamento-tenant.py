@@ -226,7 +226,8 @@ def main():
             rec('b', f'anon executa {fn}', st in (401, 403), f'http={st} {code_of(b)}')
 
         # catálogo: TODA SECURITY DEFINER do public executável por anon tem de estar na allowlist de credencial própria
-        anon_ok = {'mz_hook_fire', 'mz_ws_auth_key', 'mz_ws_effective', 'mz_ws_require', 'mz_ws_rules_get', 'mz_ws_memory', 'mz_ws_memory_append'}
+        # mz_check_session: pre-request do PostgREST (revogação no logout, 29/10) — sem parâmetro, roda em toda requisição
+        anon_ok = {'mz_hook_fire', 'mz_ws_auth_key', 'mz_ws_effective', 'mz_ws_require', 'mz_ws_rules_get', 'mz_ws_memory', 'mz_ws_memory_append', 'mz_check_session'}
         anon_x = set(psql("select p.proname from pg_proc p where p.pronamespace='public'::regnamespace and p.prosecdef "
                           "and has_function_privilege('anon', p.oid, 'EXECUTE');").split())
         rec('b', 'catálogo: SECDEF executáveis por anon ⊆ allowlist', anon_x <= anon_ok, 'extras=' + ','.join(sorted(anon_x - anon_ok)))

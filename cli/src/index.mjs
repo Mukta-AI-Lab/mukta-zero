@@ -31,7 +31,7 @@ import readline from "node:readline";
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createAuthedClient, saveSession, restoreClient, sessionPath, clearSession, localIdentity } from "./auth.mjs";
+import { createAuthedClient, saveSession, restoreClient, sessionPath, clearSession, localIdentity, revokeRemoteSession } from "./auth.mjs";
 import { sessionLabel, conversationId } from "./session.mjs";
 import { recordRun, listRuns, getRun, listSessions } from "./run-store.mjs";
 import { searchProject } from "./search.mjs";
@@ -1451,7 +1451,7 @@ function cmdHistory(args) {
   }
 }
 
-function cmdLogout() {
+async function cmdLogout() {
   const id = localIdentity();
   if (id && id.source === "env") {
     console.error("MZ_ACCESS_TOKEN está setado no ambiente — logout não remove env vars.");
@@ -1459,9 +1459,12 @@ function cmdLogout() {
     process.exitCode = 1;
     return;
   }
+  // primeiro encerra no servidor (o token deixa de valer já), depois apaga o arquivo local
+  const remote = await revokeRemoteSession();
   const removed = clearSession();
   if (removed.length === 0) console.log(`Nenhuma sessão ativa em ${sessionLabel()}.`);
   else console.log(`Deslogado de ${sessionLabel()} (removido: ${removed.join(", ")}).`);
+  if (remote === "offline") console.error("Aviso: servidor inacessível — o token antigo vale até expirar.");
 }
 
 function cmdWhoami(args) {
@@ -1546,7 +1549,7 @@ async function main() {
     return;
   }
   if (command === "logout") {
-    cmdLogout();
+    await cmdLogout();
     return;
   }
   if (command === "whoami") {

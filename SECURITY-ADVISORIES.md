@@ -37,4 +37,22 @@ gateway rate limits and a minimum password length. Tests: `cd cli && npm run sec
    API key that was stored in the vault — assume they may have been read.
 3. Review accounts created while public sign-up was open.
 
+### Follow-up (2026-10-29)
+
+- **Sign-out now revokes the access token.** Previously a token stayed valid until it expired
+  (1 hour in the web app, 24 hours for the CLI). PostgREST now runs `public.mz_check_session()`
+  before every request and the edge runtime does the same check: a token whose session was
+  ended returns 401. CLI tokens carry the session created at login, and `mz logout` ends it.
+  Storage and realtime still accept the token until it expires.
+- **Gateway:** Kong 2.8.1 (out of support) replaced by Kong 3.9.1; `kong.yml` uses
+  `_format_version: "3.0"`.
+- **Runtime:** the database driver is pinned to an exact version.
+
+To update an existing installation: re-apply `99-security-hardening.sql`; add
+`PGRST_DB_PRE_REQUEST: public.mz_check_session` to the `rest` service; change the Kong image to
+`kong:3.9.1` and `_format_version` to `"3.0"` in `kong.yml`; replace `functions/edge-runtime.ts`
+and `functions/cli-auth.ts`; recreate the `rest`, `kong` and `edge-runtime` containers. Apply
+the SQL **before** setting `PGRST_DB_PRE_REQUEST` — PostgREST fails every request if the
+function does not exist. Run `mz auth` again on each CLI.
+
 Report new issues as described in `SECURITY.md`.

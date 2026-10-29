@@ -93,6 +93,7 @@ try {
   // banco em memória com a mesma semântica dos UPDATE ... WHERE status=... RETURNING
   const rows = new Map(); // device_code → row
   let pendingCount = { total: 0, ip: 0 };
+  let sessionNotAfter = null;
   const writes = [];
   const sql = async (strings, ...v) => {
     const q = strings.join("?").replace(/\s+/g, " ").trim();
@@ -107,17 +108,18 @@ try {
       const r = [...rows.values()].find((x) => x.user_code === v[0]); return r ? [r] : [];
     }
     if (q.startsWith("update public.cli_auth_requests set status='approved'")) {
-      const r = [...rows.values()].find((x) => x.user_code === v[1] && x.status === "pending");
+      const r = [...rows.values()].find((x) => x.user_code === v[2] && x.status === "pending");
       if (!r) return [];
-      r.status = "approved"; r.user_id = v[0]; r.approved_at = new Date(); return [{ "?column?": 1 }];
+      r.status = "approved"; r.user_id = v[0]; r.session_id = v[1]; r.approved_at = new Date(); return [{ "?column?": 1 }];
     }
+    if (q.startsWith("update auth.sessions set not_after")) { sessionNotAfter = v[0]; return []; }
     if (q.startsWith("update public.cli_auth_requests set poll_count")) {
       const r = rows.get(v[0]); if (!r) return []; r.poll_count++; return [{ ...r }];
     }
     if (q.startsWith("update public.cli_auth_requests r set status='consumed'")) {
       const r = rows.get(v[0]);
       if (!r || r.status !== "approved") return [];
-      r.status = "consumed"; r.access_token = null; return [{ user_id: r.user_id, email: "a@exemplo.test" }];
+      r.status = "consumed"; r.access_token = null; return [{ user_id: r.user_id, session_id: r.session_id ?? null, email: "a@exemplo.test" }];
     }
     return [];
   };
@@ -138,10 +140,15 @@ try {
   check("start: teto global → 429", res.status === 429);
   pendingCount = { total: 0, ip: 0 };
 
+  // login sem sessão no token do GoTrue → não aprova (o token do CLI precisa de sessão revogável)
   globalThis.fetch = async () => new Response(JSON.stringify({ user: { id: U_A } }), { status: 200 });
   res = await cli(form({ action: "approve", user_code: st.user_code, email: "a@exemplo.test", password: "x" }), { sql, getSecret });
+  check("approve sem session_id no login não aprova", rows.get(st.device_code).status === "pending");
+  const S_A = "5e550000-0000-4000-8000-000000000001";
+  globalThis.fetch = async () => new Response(JSON.stringify({ user: { id: U_A }, access_token: jwt({ sub: U_A, session_id: S_A }) }), { status: 200 });
+  res = await cli(form({ action: "approve", user_code: st.user_code, email: "a@exemplo.test", password: "x" }), { sql, getSecret });
   const row = rows.get(st.device_code);
-  check("approve marca aprovado", res.status === 200 && row.status === "approved");
+  check("approve marca aprovado e guarda a sessão do login", res.status === 200 && row.status === "approved" && row.session_id === S_A);
   check("approve NÃO grava token", row.access_token === null && !writes.some((w) => /access_token=\?/.test(w)));
   check("página de aprovação não pode ser emoldurada", res.headers.get("x-frame-options") === "DENY");
   globalThis.fetch = _fetch;
@@ -158,6 +165,33 @@ try {
   check("depois do resgate o token não fica no registro", rows.get(st.device_code).access_token === null && rows.get(st.device_code).status === "consumed");
   res = await cli(post({ action: "poll", device_code: st.device_code }), { sql, getSecret });
   check("poll de novo → consumed, sem token", (await res.json()).access_token === undefined);
+  check("token do CLI carrega a sessão (logout o revoga)", claims.session_id === S_A, JSON.stringify(claims));
+  check("sessão vale o mesmo que o token", sessionNotAfter === claims.exp, String(sessionNotAfter));
+  // pedido aprovado antes da revogação (sem sessão) não recebe token
+  rows.set("legado", { device_code: "legado", status: "approved", user_id: U_A, session_id: null, approved_at: new Date(), poll_count: 0 });
+  res = await cli(post({ action: "poll", device_code: "legado" }), { sql, getSecret });
+  check("aprovação sem sessão → 410 (refazer mz auth)", res.status === 410);
+
+  // ── revogação no logout: runtime, PostgREST e hardening (29/10) ─────────────────────────────────
+  log.push("revogação no logout e runtime (29/10):");
+  const rtPath = [path.join(inst, "deploy", "edge-runtime.ts"), path.join(dir, "..", "..", "deploy", "edge-runtime.ts")].find((p) => existsSync(p));
+  const rtSrc = readFileSync(rtPath, "utf8");
+  check("runtime com postgres em versão exata", /npm:postgres@\d+\.\d+\.\d+"/.test(rtSrc));
+  check("runtime confere a sessão antes de chamar a edge", rtSrc.indexOf("sessionAlive(sid)") > 0 && rtSrc.indexOf("sessionAlive(sid)") < rtSrc.indexOf("modCache.get(m[1])"));
+  check("runtime: sessão inexistente → 401 session_revoked", /authError\(401, "session_revoked"\)/.test(rtSrc));
+  const instSrc = readFileSync(path.join(path.dirname(rtPath), "mukta-stack-install-v2.sh"), "utf8");
+  check("instalador cria mz_check_session e liga o pre-request", /FUNCTION public\.mz_check_session\(\)/.test(instSrc) && /PGRST_DB_PRE_REQUEST: public\.mz_check_session/.test(instSrc));
+  // compara o bloco da revogação até o Deno.serve (no pacote o arquivo ganha cabeçalho SPDX e o heredoc não)
+  const rtN = rtSrc.replace(/\r\n/g, "\n");
+  const rtBlk = rtN.slice(rtN.indexOf("// Revogação no logout"), rtN.indexOf("Deno.serve("));
+  check("instalador embute o mesmo runtime", rtBlk.length > 500 && instSrc.replace(/\r\n/g, "\n").includes(rtBlk) && instSrc.includes(rtN.match(/npm:postgres@[\d.]+/)[0]));
+  const hdPath = [path.join(dir, "..", "..", "packages", "zero-oss", "templates", "sql", "99-security-hardening.sql"), path.join(dir, "..", "..", "server", "sql", "99-security-hardening.sql")].find((p) => existsSync(p));
+  const hdSrc = readFileSync(hdPath, "utf8");
+  check("hardening mantém anon em mz_check_session (senão o PostgREST quebra)", /anon_ok text\[\] :=[\s\S]{0,400}'mz_check_session'/.test(hdSrc));
+  check("mz_check_session VOLATILE (STABLE deixa o planner pular a chamada)", /function public\.mz_check_session\(\) returns void\s+language plpgsql volatile/i.test(hdSrc) && /mz_check_session\(\) RETURNS void LANGUAGE plpgsql VOLATILE/.test(instSrc));
+  check("hardening dá EXECUTE a authenticated DEPOIS da revisão das SECDEF (senão usuário logado leva 403)",
+    hdSrc.lastIndexOf("grant execute on function public.mz_check_session() to anon, authenticated, service_role") > hdSrc.indexOf("anon_ok text[]"));
+  check("hardening cria a função antes de revisar as SECDEF", hdSrc.indexOf("function public.mz_check_session") < hdSrc.indexOf("anon_ok text[]"));
 
   // ── safe-zip (5.16) ─────────────────────────────────────────────────────────────────────────────
   log.push("safe-zip (5.16):");

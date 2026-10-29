@@ -17,7 +17,8 @@
 // use is capped at five users per organisation; beyond that, a commercial
 // licence is required: licensing@mukta.app
 // Full terms: AI-USAGE-NOTICE.md and LICENSE.md
-import postgres from "npm:postgres@3";
+// versão exata: o cache do Deno não é volume, então cada recriação do container baixa de novo (auditoria externa, 29/10)
+import postgres from "npm:postgres@3.4.9";
 const PGURL = Deno.env.get("PGURL")!;
 const PORT = Number(Deno.env.get("EDGE_PORT") ?? "9000");
 const sql = postgres(PGURL);
@@ -47,6 +48,32 @@ function sameToken(a: string, b: string): boolean {
 // Nomes que NÃO são edges: módulos internos (`_obs`, `_shared`) e o próprio runtime.
 const NOT_A_FUNCTION = /^(_|edge-runtime$)/;
 
+// Revogação no logout (auditoria externa, 29/10): o JWT do GoTrue (e o do CLI) carrega `session_id`, e o logout
+// apaga a linha em auth.sessions. Token cuja sessão não existe mais volta 401 aqui, antes de qualquer edge.
+// Token sem `session_id` (service_role, harness) segue para o verificador da edge. Cache curto por sessão.
+const SESSION_TTL_MS = 15_000;
+const sessionCache = new Map<string, { ok: boolean; at: number }>();
+function bearerSessionId(req: Request): string | null {
+  const h = req.headers.get("authorization") || "";
+  const p = h.startsWith("Bearer ") ? h.slice(7).split(".")[1] : "";
+  if (!p) return null;
+  try {
+    const c = JSON.parse(atob(p.replace(/-/g, "+").replace(/_/g, "/")));
+    return typeof c.session_id === "string" && c.session_id ? c.session_id : null;
+  } catch { return null; }
+}
+async function sessionAlive(sid: string): Promise<boolean> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sid)) return false;
+  const now = Date.now(), hit = sessionCache.get(sid);
+  if (hit && now - hit.at < SESSION_TTL_MS) return hit.ok;
+  const r = await sql`select 1 from auth.sessions where id = ${sid}::uuid and (not_after is null or not_after > now())`;
+  if (sessionCache.size > 5000) sessionCache.clear();
+  sessionCache.set(sid, { ok: r.length > 0, at: now });
+  return r.length > 0;
+}
+const authError = (status: number, error: string) =>
+  new Response(JSON.stringify({ error }), { status, headers: { "content-type": "application/json", "www-authenticate": 'Bearer error="invalid_token"' } });
+
 Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
   const url = new URL(req.url);
   if (url.pathname === "/__health" || url.pathname === "/functions/v1/__health") {
@@ -63,6 +90,15 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
   }
   const m = url.pathname.match(/^\/(?:functions\/v1\/)?([\w-]+)\/?$/);
   if (!m || NOT_A_FUNCTION.test(m[1])) return new Response("mukta edge runtime", { status: 200 });
+  const sid = req.method === "OPTIONS" ? null : bearerSessionId(req);
+  if (sid) {
+    try { if (!(await sessionAlive(sid))) return authError(401, "session_revoked"); }
+    catch (e) {
+      // sem banco não há como saber se a sessão vale: falha fechada
+      console.error("[mukta-edge] checagem de sessão falhou:", (e instanceof Error ? e.message : String(e)).slice(0, 200));
+      return authError(503, "session_check_unavailable");
+    }
+  }
   try {
     let mod = modCache.get(m[1]);
     if (!mod) { mod = await import("file:///functions/" + m[1] + ".ts"); modCache.set(m[1], mod); }

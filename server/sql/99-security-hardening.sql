@@ -33,9 +33,27 @@
 --      passar o company_id de outro cliente);
 --   5) get_vault_secret só para service_role; search_path fixo em toda SECURITY DEFINER;
 --   6) registro filho (mensagem, arquivo de projeto) só em conversa/projeto do próprio usuário;
---   7) login do CLI sem token gravado (coluna client_ip_hash usada pelo teto do start).
+--   7) login do CLI sem token gravado (coluna client_ip_hash usada pelo teto do start);
+--   8) logout revoga o token: public.mz_check_session() (PGRST_DB_PRE_REQUEST do PostgREST) recusa JWT cuja
+--      sessão não existe mais em auth.sessions; o token do CLI carrega a sessão do login (session_id).
 
 begin;
+
+-- 8) revogação no logout — criada ANTES do passo 3 para entrar na allowlist de anon (roda em toda requisição,
+--    inclusive anônima; sem parâmetro, só responde sobre a sessão do próprio token)
+-- VOLATILE de propósito: STABLE deixa o planner descartar a chamada quando o resultado não é usado
+create or replace function public.mz_check_session() returns void
+language plpgsql volatile security definer set search_path = '' as $fn$
+declare sid text := nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'session_id';
+begin
+  if sid is null or sid = '' then return; end if;
+  if sid !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' or not exists (
+       select 1 from auth.sessions s where s.id = sid::uuid and (s.not_after is null or s.not_after > now())) then
+    raise sqlstate 'PGRST' using
+      message = '{"code":"MZ401","message":"session revoked","details":null,"hint":"sign in again"}',
+      detail  = '{"status":401,"headers":{"WWW-Authenticate":"Bearer error=\"invalid_token\""}}';
+  end if;
+end $fn$;
 
 -- 1) RLS em toda tabela do public
 do $$
@@ -71,7 +89,9 @@ declare
   r record;
   -- autenticam por CHAVE própria (hash sha512) — precisam ficar com anon
   anon_ok text[] := array['mz_hook_fire', 'mz_ws_effective', 'mz_ws_require', 'mz_ws_rules_get', 'mz_ws_auth_key',
-                          'mz_ws_memory_append', 'mz_ws_memory'];
+                          'mz_ws_memory_append', 'mz_ws_memory',
+                          -- pre-request do PostgREST: roda em toda requisição (8)
+                          'mz_check_session'];
   -- RPCs chamadas pelo app/CLI com a sessão do usuário (escopo por auth.uid() dentro da função)
   app_rpc text[] := array['mz_admin_list_signups', 'mz_admin_list_users', 'mz_sweep_stale_runs', 'mz_admin_ct_fleet_health',
     'mz_admin_ct_active_runs', 'mz_admin_ct_consumption', 'mz_admin_decide_signup', 'mz_admin_request_kill',
@@ -108,6 +128,11 @@ begin
   end if;
 end $$;
 
+-- 8b) grants da pre-request, DEPOIS da revisão acima: com os default privileges (92) a função nasce sem EXECUTE e o
+--     passo 3 só devolve anon/service_role — sem authenticated, toda requisição de usuário logado falharia no PostgREST
+revoke all on function public.mz_check_session() from public;
+grant execute on function public.mz_check_session() to anon, authenticated, service_role;
+
 -- 6) registro filho só em pai do próprio usuário
 do $$
 begin
@@ -132,6 +157,7 @@ do $$
 begin
   if to_regclass('public.cli_auth_requests') is not null then
     alter table public.cli_auth_requests add column if not exists client_ip_hash text;
+    alter table public.cli_auth_requests add column if not exists session_id uuid;
     create index if not exists cli_auth_pending_ip_idx on public.cli_auth_requests (client_ip_hash) where status = 'pending';
     update public.cli_auth_requests set access_token = null where access_token is not null;
   end if;

@@ -113,6 +113,30 @@ export function clearSession() {
 }
 
 /**
+ * Encerra no servidor a sessão do token salvo (GoTrue /logout, escopo local). Depois disso o runtime das edges e o
+ * PostgREST recusam o token mesmo antes de ele expirar. Best-effort: sem rede, o logout local segue e o token
+ * vale até expirar. Retorna "revoked" | "expired" | "offline" | "none".
+ */
+export async function revokeRemoteSession() {
+  const s = loadRawSession();
+  const token = s?.access_token;
+  if (!token) return "none";
+  const exp = jwtExp(token);
+  if (exp && exp * 1000 <= Date.now()) return "expired";
+  try {
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/logout?scope=local`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    // 204 = encerrada; 401/403/404 = a sessão já não existia
+    return r.ok || r.status === 401 || r.status === 403 || r.status === 404 ? "revoked" : "offline";
+  } catch {
+    return "offline";
+  }
+}
+
+/**
  * Identidade LOCAL (sem rede) p/ `mz whoami`/`mz logout`. Precedência espelha
  * restoreClient: MZ_ACCESS_TOKEN env > arquivo de sessão (per-sessão/legado).
  */

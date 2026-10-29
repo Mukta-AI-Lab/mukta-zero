@@ -89,6 +89,9 @@ services:
       PGRST_DB_ANON_ROLE: anon
       PGRST_JWT_SECRET: ${JWT_SECRET}
       PGRST_DB_USE_LEGACY_GUCS: "false"
+      # token de sessão encerrada (logout) volta 401 em toda requisição; a função tem de existir ANTES (senão toda
+      # requisição falha) — criada pelo hardening de segurança / init do instalador
+      PGRST_DB_PRE_REQUEST: public.mz_check_session
     networks: [sb]
   storage:
     image: supabase/storage-api:v1.19.3
@@ -160,7 +163,9 @@ services:
     volumes: ["./functions:/functions"]
     networks: [sb]
   kong:
-    image: kong:2.8.1
+    # 3.9.1 desde 29/10 (2.8.1 fora de suporte — auditoria externa 5.14); smoke 22/22 idêntico antes da troca
+    image: kong:3.9.1
+    ulimits: { nofile: { soft: 65536, hard: 65536 } }
     container_name: mz-kong
     restart: unless-stopped
     logging: *dl

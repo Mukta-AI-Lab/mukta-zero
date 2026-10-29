@@ -145,10 +145,17 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
       gj = await gr.json();
     } catch { /* */ }
     const userId = gj?.user?.id;
-    if (!userId) return page(`<h1>Login falhou</h1><p class="err">Email ou senha incorretos.</p><p><a href="${verifyUrlBase}?code=${esc(user_code)}" style="color:#7dd3fc">Tentar de novo</a></p>`);
+    // a sessão criada por este login vira a sessão do token do CLI: o logout (web ou `mz logout`) a apaga e o token cai
+    let sessionId: string | null = null;
+    try {
+      const sp = String(gj?.access_token || "").split(".")[1] || "";
+      const sid = JSON.parse(atob(sp.replace(/-/g, "+").replace(/_/g, "/")))?.session_id;
+      if (typeof sid === "string" && /^[0-9a-f-]{36}$/i.test(sid)) sessionId = sid;
+    } catch { /* sem sessão = login não concluído */ }
+    if (!userId || !sessionId) return page(`<h1>Login falhou</h1><p class="err">Email ou senha incorretos.</p><p><a href="${verifyUrlBase}?code=${esc(user_code)}" style="color:#7dd3fc">Tentar de novo</a></p>`);
     let done: any[] = [];
     try {
-      done = await sql`update public.cli_auth_requests set status='approved', user_id=${userId}::uuid, approved_at=now()
+      done = await sql`update public.cli_auth_requests set status='approved', user_id=${userId}::uuid, session_id=${sessionId}::uuid, approved_at=now()
         where user_code=${user_code} and status='pending' and expires_at > now() returning 1`;
     } catch { return page(`<h1>Erro</h1><p class="err">Não foi possível concluir.</p>`); }
     if (!done.length) return page(`<h1>Código inválido/expirado</h1><p class="err">Rode <b>mz auth</b> de novo.</p>`);
@@ -173,14 +180,19 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
       won = await sql`update public.cli_auth_requests r set status='consumed', access_token=null
         where r.device_code = ${device_code} and r.status = 'approved'
           and r.approved_at > now() - make_interval(mins => ${APPROVED_REDEEM_WINDOW_MIN})
-        returning r.user_id, (select u.email from auth.users u where u.id = r.user_id) as email`;
+        returning r.user_id, r.session_id, (select u.email from auth.users u where u.id = r.user_id) as email`;
     } catch (e) {
       console.error("[cli-auth] poll: resgate falhou:", String((e as Error)?.message || e).slice(0, 160));
       return j({ error: "poll_failed" }, 503);
     }
     if (!won.length) return j({ status: "consumed" });
+    // pedido aprovado antes da revogação no logout (29/10) não tem sessão: o CLI pede `mz auth` de novo
+    if (!won[0].session_id) return j({ status: "expired" }, 410);
     const now = Math.floor(Date.now() / 1000);
-    const token = await signJwt({ iss: issuer, sub: won[0].user_id, email: won[0].email || undefined, role: "authenticated", aud: "authenticated", iat: now, exp: now + TOKEN_TTL_S, amr: [{ method: "cli-device" }] }, jwtSecret);
+    // a sessão vale o mesmo que o token; logout apaga a linha e o runtime/PostgREST passam a recusar o token
+    try { await sql`update auth.sessions set not_after = to_timestamp(${now + TOKEN_TTL_S}) where id = ${won[0].session_id}::uuid`; }
+    catch (e) { console.error("[cli-auth] poll: sessão não atualizada:", String((e as Error)?.message || e).slice(0, 160)); }
+    const token = await signJwt({ iss: issuer, sub: won[0].user_id, email: won[0].email || undefined, role: "authenticated", aud: "authenticated", iat: now, exp: now + TOKEN_TTL_S, session_id: won[0].session_id, aal: "aal1", amr: [{ method: "cli-device" }] }, jwtSecret);
     return j({ status: "approved", access_token: token, user_id: won[0].user_id, expires_in: TOKEN_TTL_S });
   }
 
