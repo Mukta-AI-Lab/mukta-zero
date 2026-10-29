@@ -34,8 +34,21 @@
  *   with a combined `blocked` verdict.
  */
 
-import { cyberGate } from "../vendor/cyber-gate.mjs";
 import { invokeJsonEdge } from "./api.mjs";
+
+// O gate de assinaturas é vendorizado e NÃO viaja na distribuição pública (vendor/ fica fora do pacote). Sem ele o
+// CLI nem iniciava (import estático — auditoria externa 7.5). Agora o import é tolerante e a ausência FALHA FECHADA:
+// todo código revisado sai "bloqueado" com o motivo explícito, em vez de passar sem verificação.
+let cyberGate;
+try {
+  ({ cyberGate } = await import("../vendor/cyber-gate.mjs"));
+} catch {
+  cyberGate = () => {
+    const findings = [{ rule: "gate_unavailable", severity: "block", line: 0, snippet: "",
+      message: "gate local de segurança indisponível nesta instalação (vendor/cyber-gate.mjs ausente) — o código não foi verificado" }];
+    return { ok: false, blocked: true, findings, summary: "gate local indisponível: bloqueado por precaução" };
+  };
+}
 import { RUN_AGENT_CHAT_URL } from "./config.mjs";
 import { refreshAuthContext } from "./auth.mjs";
 

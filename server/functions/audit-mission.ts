@@ -22,6 +22,8 @@
 // por regra determinística, e pede ao CÉREBRO (ladder SSOT) um relatório+veredito sob o
 // contrato 7a (analista read-only, factual, PII-safe). Persiste em mz_agent_audits.
 // Contrato mukta-edge: (req, {sql, getSecret}). NÃO muta os dados auditados.
+// 🔒 CORS por allowlist (2026-10-22): import ESTÁTICO → deploy SÓ por bundle (deploy-edge-bundle.sh audit-mission).
+import { corsHeaders, verifyJwtHs256 } from "./_shared/tenant-guard.ts";
 
 function b64urlToBytes(s: string): Uint8Array {
   const b = s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "=");
@@ -30,17 +32,8 @@ function b64urlToBytes(s: string): Uint8Array {
   return out;
 }
 function b64urlToJson(s: string): any { return JSON.parse(new TextDecoder().decode(b64urlToBytes(s))); }
-async function verifyJwt(token: string, secret: string): Promise<any> {
-  const parts = token.split("."); if (parts.length !== 3) throw new Error("jwt malformado");
-  const [h, p, sig] = parts;
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
-  const ok = await crypto.subtle.verify("HMAC", key, b64urlToBytes(sig), new TextEncoder().encode(`${h}.${p}`));
-  if (!ok) throw new Error("assinatura inválida");
-  const claims = b64urlToJson(p);
-  if (claims.exp && Date.now() / 1000 > claims.exp) throw new Error("token expirado");
-  if (!claims.sub) throw new Error("sem sub");
-  return claims;
-}
+// Verificador ÚNICO (exp obrigatório, iss/aud/alg conferidos) — auditoria externa 5.22, 28/10.
+const verifyJwt = async (t: string, s: string) => { const c = await verifyJwtHs256(t, s); if (!c.sub) throw new Error("sem sub"); return c; };
 
 // Contrato 7a inline: o auditor é um analista SOMENTE-LEITURA, factual e PII-safe.
 const AUDIT_CONTRACT = [
@@ -54,13 +47,20 @@ const AUDIT_CONTRACT = [
   'Responda SOMENTE JSON: {"verdict":"ok|atencao|falha","report":"texto do relatório em markdown curto"}.',
 ].join("\n");
 
+// 💰 CUSTO DE PROVEDOR na plataforma Mukta (Herbert 2026-10-08: "a chave é da Mukta"). Só VISIBILIDADE do custo
+// interno (tenant vazio → empresa de plataforma); NÃO altera a cobrança do usuário MZ (mz_charge_run segue igual).
+// Import DINÂMICO de propósito: com bundle (esbuild) o módulo é embutido; num deploy cru single-file o import falha,
+// é capturado e só o registro fica desligado — a função nunca quebra por causa disso. Fire-and-forget.
+let _mzCostWarn = 0;
+function mzProviderCost(a: Record<string, unknown>): void {
+  import("./_shared/record-llm-usage.mjs")
+    .then((m: any) => m.recordMzProviderCost(a))
+    .catch((e) => { if (_mzCostWarn++ < 3) console.error("[mz-provider-cost] módulo de registro indisponível (deploy sem bundle?):", String((e as Error)?.message || e).slice(0, 160)); });
+}
+
 export default async function (req: Request, ctx: { sql: any; getSecret: (n: string) => string | undefined }) {
   const { sql, getSecret } = ctx;
-  const origin = req.headers.get("origin") || "*";
-  const cors: Record<string, string> = {
-    "access-control-allow-origin": origin, "access-control-allow-headers": "apikey, content-type, authorization",
-    "access-control-allow-methods": "POST, OPTIONS", "vary": "Origin",
-  };
+  const cors = corsHeaders(req); // allowlist do mz-workspace (antes refletia qualquer Origin)
   const j = (o: unknown, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { ...cors, "content-type": "application/json" } });
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
   if (req.method !== "POST") return j({ error: "method_not_allowed" }, 405);
@@ -140,10 +140,13 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
       if (!key) continue;
       try {
         const payload: any = { model: m.model_slug, messages, temperature: 0.15, max_tokens: 1600, response_format: { type: "json_object" } };
+        const mzT0 = Date.now();
         const resp = await fetch(`${String(m.base_url).replace(/\/+$/, "")}/chat/completions`, {
           method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${key}` }, body: JSON.stringify(payload),
         });
-        const raw = await resp.text(); if (!resp.ok) continue;
+        const raw = await resp.text();
+        mzProviderCost({ module: "audit-mission", provider: m.provider, baseUrl: m.base_url, modelId: m.model_slug, responseText: raw, ok: resp.ok, latencyMs: Date.now() - mzT0 });
+        if (!resp.ok) continue;
         let parsed: any = null; try { parsed = JSON.parse(raw); } catch { /* */ }
         const content = parsed?.choices?.[0]?.message?.content ?? "";
         if (content && content.trim()) return { content, tokens: Number(parsed?.usage?.total_tokens) || 0, model: m.model_slug };

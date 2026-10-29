@@ -40,6 +40,10 @@
  * nº de segmentos bounded; dimensões A/B/C default (D/E opt-in); deadline curto -> pontua o que deu tempo.
  */
 
+// 💰 CUSTO DE PROVEDOR na plataforma Mukta (Herbert 2026-10-08) — visibilidade interna, tenant vazio; NÃO altera mz_charge_run.
+// Import ESTÁTICO: este arquivo só é deployado via bundle esbuild (deploy-mz-office.sh). Fire-and-forget, nunca lança.
+import { recordMzProviderCost } from "../_shared/record-llm-usage.mjs";
+
 // deno-lint-ignore no-explicit-any
 type Sql = any;
 // deno-lint-ignore no-explicit-any
@@ -172,8 +176,10 @@ async function llmJson(role: ResolvedRole, system: string, user: string, maxToke
   for (let a = 1; a <= 2; a++) {
     const ac = new AbortController(); const tm = setTimeout(() => ac.abort(), timeoutMs);
     try {
+      const mzT0 = Date.now();
       const resp = await fetch(`${role.base_url.replace(/\/+$/, "")}/chat/completions`, { method: "POST", signal: ac.signal, headers: { "content-type": "application/json", authorization: `Bearer ${role.key}` }, body: JSON.stringify(payload) });
       const raw = await resp.text();
+      recordMzProviderCost({ module: "mz-office.audit-integrity", provider: role.provider, baseUrl: role.base_url, modelId: role.model_slug, responseText: raw, ok: resp.ok, latencyMs: Date.now() - mzT0 });
       if (resp.ok) {
         let content = "";
         try { content = JSON.parse(raw)?.choices?.[0]?.message?.content || ""; } catch { content = ""; }

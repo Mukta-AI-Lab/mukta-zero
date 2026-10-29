@@ -43,6 +43,7 @@ as $fn$
   from public.agent_execution_logs
   where company_id in (select company_id from public.user_company_memberships where user_id = auth.uid());
 $fn$;
+revoke all on function public.get_my_usage_summary() from public, anon;   -- isolamento 2026-10-22
 grant execute on function public.get_my_usage_summary() to authenticated;
 
 notify pgrst, 'reload schema';

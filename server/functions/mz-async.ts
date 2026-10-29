@@ -22,27 +22,19 @@
 // Mecanismo (verificado no runtime .107): fire-and-forget — a promise não-awaitada CONTINUA server-side
 // após o Response retornar. O submit cria o job e retorna job_id <1s (sob o limite CF); o processamento
 // (chamada interna ao run-agent-chat via kong, até 300s) roda desacoplado; o cliente faz poll do status.
+// 🔒 Isolamento entre tenants (2026-10-22): import ESTÁTICO → deploy SÓ por bundle (deploy-edge-bundle.sh mz-async).
+import { corsHeaders, resolveTenant, guardErrorBody, jobOwnedBy, ownsConversation, verifyJwtHs256 } from "./_shared/tenant-guard.ts";
 
 function b64urlToBytes(s: string): Uint8Array {
   s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "=";
   const bin = atob(s); const b = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i); return b;
 }
-async function verifyJwt(token: string, secret: string): Promise<any> {
-  const parts = token.split("."); if (parts.length !== 3) throw new Error("jwt malformado");
-  const [h, p, sig] = parts;
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
-  const ok = await crypto.subtle.verify("HMAC", key, b64urlToBytes(sig), new TextEncoder().encode(`${h}.${p}`));
-  if (!ok) throw new Error("assinatura inválida");
-  const claims = JSON.parse(new TextDecoder().decode(b64urlToBytes(p)));
-  if (claims.exp && Date.now() / 1000 > claims.exp) throw new Error("token expirado");
-  if (!claims.sub) throw new Error("sem sub");
-  return claims;
-}
+// Verificador ÚNICO (exp obrigatório, iss/aud/alg conferidos) — auditoria externa 5.22, 28/10.
+const verifyJwt = async (t: string, s: string) => { const c = await verifyJwtHs256(t, s); if (!c.sub) throw new Error("sem sub"); return c; };
 
 export default async function (req: Request, ctx: { sql: any; getSecret: (n: string) => string | undefined }) {
   const { sql, getSecret } = ctx;
-  const _allowed = ["https://app.example.com", "https://api.example.com"]; const _o = req.headers.get("origin");
-  const CORS: Record<string, string> = { "Access-Control-Allow-Origin": !_o ? "*" : (_allowed.includes(_o) ? _o : _allowed[0]), "Access-Control-Allow-Headers": "apikey, content-type, authorization", "Access-Control-Allow-Methods": "POST, OPTIONS", "Vary": "Origin" };
+  const CORS = corsHeaders(req);
   const j = (o: unknown, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { ...CORS, "Content-Type": "application/json" } });
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return j({ error: "POST only" }, 405);
@@ -116,7 +108,8 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
     let r: any[] = [];
     try { r = await sql`select status, result, error, user_id, updated_at, phase, phases, kill_requested_at from public.mz_jobs where id = ${id} limit 1`; } catch { /* */ }
     if (!r.length) return j({ status: "not_found" }, 404);
-    if (r[0].user_id && r[0].user_id !== userId) return j({ error: "forbidden" }, 403);
+    // Dono ESTRITO: job com user_id nulo não é legível por ninguém (antes falhava aberto — auditoria B6/M1).
+    if (!jobOwnedBy(r[0].user_id, userId)) return j({ error: "forbidden" }, 403);
 
     // ── PARADA COM EFEITO IMEDIATO (UAT 2026-08-26 §3.2, 2ª volta) ──────────────────────────
     // O kill cooperativo sozinho só surtia efeito quando o upstream retornava — medido: 2min+
@@ -163,6 +156,9 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
     temperature: typeof src.temperature === "number" ? src.temperature : undefined,
     session_id: typeof src.session_id === "string" ? src.session_id : undefined, // preserva contexto de conversa (front mz-web)
     project_id: typeof src.project_id === "string" ? src.project_id : undefined, // vínculo chat→projeto (base de conhecimento)
+    // intent:"code" (mz agent/patch): o run-agent-chat desliga ferramentas e heurísticas de documento (gap G3).
+    // Só o valor conhecido passa — qualquer outro é descartado, como o resto desta lista.
+    intent: src.intent === "code" ? "code" : undefined,
   };
   // ── PORTÃO DE ENTRADA (UAT 2026-08-26) ───────────────────────────────────────────────────
   // ANTES: payload inválido era ACEITO com 200 + job_id e só falhava depois, gravado como
@@ -200,6 +196,15 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
       return j({ error: "project_check_falhou", detail: String((e as Error).message || e).slice(0, 120) }, 500);
     }
   }
+  // 🔒 CRÍTICO C5 (auditoria 2026-10-22): company_id/agent_id vão ao run-agent-chat — conferir o vínculo
+  // ANTES de criar o job (o run-agent-chat confere de novo; aqui a recusa sai já no submit, sem job órfão).
+  if (input.company_id !== undefined || input.agent_id !== undefined) {
+    const t = await resolveTenant(sql, userId, input.company_id, input.agent_id);
+    if (!t.ok) return j(guardErrorBody(t.err), t.err.status);
+  }
+  // session_id do corpo: só grava na conversa se ela for DO usuário (auditoria M2). Conversa alheia ou
+  // inexistente → o job roda, mas nada é escrito em mz_messages com esse id.
+  const conversaPropria = typeof input.session_id === "string" ? await ownsConversation(sql, userId, input.session_id) : false;
 
   let jobId: string;
   try {
@@ -228,7 +233,7 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
   // `mz-cli` (terminal + painel do VS Code, que usam o mesmo motor).
   const CLIENTES_SEM_PERSISTENCIA_PROPRIA = new Set(["mz-cli"]);
   if (
-    typeof input.session_id === "string" &&
+    typeof input.session_id === "string" && conversaPropria &&
     Array.isArray(input.messages) &&
     CLIENTES_SEM_PERSISTENCIA_PROPRIA.has(String(input.client_name || ""))
   ) {
@@ -279,7 +284,7 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
       // fica na conversa mesmo se o front desconectar (tarefas de >10min). O front só EXIBE, não salva mais. Best-effort.
       // `!cancelado`: run cancelado não escreve na conversa — o usuário mandou parar, ver a
       // resposta aparecer depois é a mesma quebra de confiança do botão que não parava.
-      if (ok && !cancelado && typeof input.session_id === "string" && result && typeof result.response_text === "string" && result.response_text.trim()) {
+      if (ok && !cancelado && typeof input.session_id === "string" && conversaPropria && result && typeof result.response_text === "string" && result.response_text.trim()) {
         try { await sql`insert into public.mz_messages (user_id, conversation_id, role, content) values (${userId}::uuid, ${input.session_id}::uuid, 'assistant', ${result.response_text})`; } catch { /* */ }
       }
       // OBSERVABILIDADE (Control Tower): grava mz_agent_runs → runs/tokens/consumo-por-agente. Best-effort.

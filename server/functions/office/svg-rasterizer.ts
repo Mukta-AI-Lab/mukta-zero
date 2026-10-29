@@ -99,6 +99,8 @@ export interface RasterizeOptions {
  *
  * Throws if the SVG is malformed or the WASM init fails.
  */
+const MAX_OUTPUT_PIXELS = 4096 * 4096;
+
 export async function rasterizeSvgToPng(
   svg: string,
   opts: RasterizeOptions = {},
@@ -106,6 +108,7 @@ export async function rasterizeSvgToPng(
   if (!svg || typeof svg !== "string") {
     throw new Error("rasterizeSvgToPng: svg argument must be a non-empty string");
   }
+  if (svg.length > 2 * 1024 * 1024) throw new Error("rasterizeSvgToPng: svg acima de 2 MB");
   await ensureResvgInitialized();
   const fonts = await ensureFontLoaded();
 
@@ -122,6 +125,17 @@ export async function rasterizeSvgToPng(
       ? { loadSystemFonts: false, fontBuffers: fonts, defaultFontFamily: DEFAULT_FONT_FAMILY }
       : { loadSystemFonts: false },
   });
+
+  // Teto de pixels (auditoria externa 5.16, 28/10): um SVG com width/height intrínsecos enormes estourava a memória
+  // do processo único das edges. Calcula a saída pelo modo de ajuste e recusa acima de ~16,7 Mpx (4096²).
+  const ow = Number((resvg as any).width) || 0, oh = Number((resvg as any).height) || 0;
+  let outW = ow, outH = oh;
+  if (fitTo.mode === "width" && ow > 0) { outW = (fitTo as any).value; outH = Math.round(oh * outW / ow); }
+  else if (fitTo.mode === "height" && oh > 0) { outH = (fitTo as any).value; outW = Math.round(ow * outH / oh); }
+  if (ow > 0 && oh > 0 && (outW * outH > MAX_OUTPUT_PIXELS || outW > 8192 || outH > 8192)) {
+    try { (resvg as any).free?.(); } catch { /* */ }
+    throw new Error(`rasterizeSvgToPng: saída ${outW}x${outH} acima do limite`);
+  }
 
   const pngData = resvg.render();
   const bytes = pngData.asPng();

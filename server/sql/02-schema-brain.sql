@@ -31,8 +31,13 @@
 -- FKs entre objetos deste slice e self-FKs foram MANTIDAS. Lista completa de deps ausentes
 -- no bloco final "=== DEPS FALTANTES ===".
 --
--- RLS NÃO é habilitada aqui (acesso via service-role interno). Tabelas que na origem têm
--- RLS por company/user estão anotadas com "-- RLS RECOMENDADO".
+-- ISOLAMENTO DE TENANT (2026-10-22, docs/audits/mz-isolamento-tenant-*-2026-10-22.md): o acesso às tabelas
+-- do cérebro é SÓ service-level (edges = pool supabase_admin; scripts = service_role). A seção (h) liga a RLS
+-- SEM policy de usuário e NÃO concede nada a anon/authenticated nessas tabelas. Funções: grants NOMINAIS, nunca
+-- `grant execute on all functions` (reabria a authenticated as revogadas e deixava PUBLIC/anon nas SECURITY DEFINER).
+-- ⚠️ Este arquivo recria várias RPCs na versão SEM guarda de tenant. Depois de reaplicá-lo, reaplicar por
+--    ÚLTIMO migrations/20261022120400_mz_isolamento_funcoes_secdef.sql (idempotente) — ver migrations/README.md.
+-- Tabelas que na origem têm RLS por company/user estão anotadas com "-- RLS RECOMENDADO".
 -- ============================================================================
 
 set check_function_bodies = off;  -- permite criar SQL fns que referenciam deps ainda ausentes (padrão pg_dump)
@@ -697,8 +702,9 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.get_internal_config(text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.get_internal_config(text) FROM anon;
-GRANT EXECUTE ON FUNCTION public.get_internal_config(text) TO authenticated, service_role;
+REVOKE ALL ON FUNCTION public.get_internal_config(text) FROM anon, authenticated;
+-- só service-level: o internal_config guarda segredo de cron e as URLs por onde passa o conteúdo de todos os tenants
+GRANT EXECUTE ON FUNCTION public.get_internal_config(text) TO service_role;
 
 -- get_effective_rag_flag ----------------------------------------------------
 -- TODO DEP FALTANTE: public.agent_profiles, public.agent_rag_flags, public.company_rag_flags,
@@ -1461,6 +1467,7 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION public.get_session_memory_traceback(TEXT, UUID, UUID, UUID, INT) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.get_session_memory_traceback(
     TEXT,
     UUID,
@@ -1527,6 +1534,7 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION public.append_session_memory_event(TEXT, UUID, UUID, TEXT, TEXT, TEXT, UUID, JSONB) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.append_session_memory_event(
     TEXT,
     UUID,
@@ -1660,6 +1668,7 @@ as $function$
   from upserted;
 $function$;
 
+REVOKE ALL ON FUNCTION public.enqueue_memory_learning_job(TEXT, UUID, UUID, UUID, UUID, TEXT, UUID, UUID, TEXT, UUID, TEXT, JSONB, INTEGER) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.enqueue_memory_learning_job(TEXT, UUID, UUID, UUID, UUID, TEXT, UUID, UUID, TEXT, UUID, TEXT, JSONB, INTEGER) TO service_role;
 
 -- ---------------------------------------------------------------------------
@@ -1676,6 +1685,9 @@ set search_path = public
 as $$
   select value from vault.secrets where name = secret_name limit 1;  -- instância usa vault custom (name/value plaintext), não vault.decrypted_secrets
 $$;
+-- Lê o vault em texto claro: NUNCA executável por PUBLIC/anon/authenticated (no vivo já estava fechado; o repo não).
+revoke all on function public.get_vault_secret(text) from public, anon, authenticated;
+grant execute on function public.get_vault_secret(text) to service_role;
 
 -- Consumo de serviço / billing gate — STUB permissivo.
 create or replace function public.consume_service(
@@ -1732,11 +1744,12 @@ $$;
 -- ---------------------------------------------------------------------------
 grant usage on schema public to authenticated, anon, service_role;
 
+-- Tabelas do cérebro: SÓ service-level. RLS ligada sem policy de usuário; nada para anon/authenticated.
+-- (Antes: CRUD para authenticated SEM RLS = qualquer usuário lia/alterava logs, memória e config de TODAS as
+--  empresas. Isolamento de tenant 2026-10-22.) Só conceda a authenticated com RLS + policy por tenant ANTES.
 grant select, insert, update, delete on
   public.internal_config,
   public.llm_role_defaults,
-  public.memory_topics,
-  public.memory_nodes,
   public.knowledge_nodes,
   public.agent_tools,
   public.agent_tool_assignments,
@@ -1746,11 +1759,56 @@ grant select, insert, update, delete on
   public.agent_execution_logs,
   public.agent_run_artifacts,
   public.agent_behavior_violations,
-  public.memory_learning_queue,
   public.memory_learning_runs
+to service_role;
+do $$
+declare t text;
+begin
+  foreach t in array array['internal_config','llm_role_defaults','knowledge_nodes','agent_tools','agent_tool_assignments',
+    'agent_session_memory','llm_execution_log','llm_dispatch_audit_log','agent_execution_logs','agent_run_artifacts',
+    'agent_behavior_violations','memory_learning_runs'] loop
+    execute format('alter table public.%I enable row level security', t);
+    execute format('revoke all on table public.%I from anon, authenticated', t);
+  end loop;
+end $$;
+-- llm_role_defaults: leitura só para o admin do MZ (fallback do scripts/agent/agent-runtime.cjs logado como admin)
+-- (is_mz_admin vem do mz-admin.sql; numa instância nova sem ele, a policy fica para a migration 20261022120200)
+do $$
+begin
+  if to_regprocedure('public.is_mz_admin()') is not null then
+    drop policy if exists llm_role_defaults_admin_read on public.llm_role_defaults;
+    create policy llm_role_defaults_admin_read on public.llm_role_defaults for select to authenticated using (public.is_mz_admin());
+    grant select on public.llm_role_defaults to authenticated;
+  end if;
+end $$;
+
+-- Memória: RLS + policies próprias (migrations/20260818120000_memoria_etapa1_ontologia_e_rls.sql)
+grant select, insert, update, delete on
+  public.memory_topics,
+  public.memory_nodes,
+  public.memory_learning_queue
 to authenticated, service_role;
 
-grant execute on all functions in schema public to authenticated, service_role;
+-- Funções deste arquivo: grants NOMINAIS. Nada de PUBLIC/anon. authenticated só nas RPCs que o produto chama
+-- com JWT de usuário (as de memória têm guarda de tenant — ver migration 20261022120400).
+do $$
+declare r record;
+  v_fns text[] := array['update_updated_at_column','validate_run_artifact_correlation','set_memory_learning_updated_at',
+    'get_internal_config','get_effective_rag_flag','get_company_memory_config','get_prompt_instruction_memories',
+    'search_memory_tree','consult_knowledge_base','hybrid_search','get_session_memory_traceback',
+    'append_session_memory_event','enqueue_memory_learning_job','get_vault_secret','consume_service',
+    'llm_circuit_is_open','llm_circuit_record_failure','llm_circuit_record_success'];
+  v_auth text[] := array['get_effective_rag_flag','get_company_memory_config','get_prompt_instruction_memories',
+    'search_memory_tree','consult_knowledge_base','hybrid_search','get_session_memory_traceback',
+    'append_session_memory_event','enqueue_memory_learning_job'];
+begin
+  for r in select p.oid::regprocedure as sig, p.proname from pg_proc p
+            where p.pronamespace = 'public'::regnamespace and p.proname = any(v_fns) loop
+    execute format('revoke all on function %s from public, anon, authenticated', r.sig);
+    execute format('grant execute on function %s to service_role', r.sig);
+    if r.proname = any(v_auth) then execute format('grant execute on function %s to authenticated', r.sig); end if;
+  end loop;
+end $$;
 grant usage, select on all sequences in schema public to authenticated, service_role;
 
 -- ---------------------------------------------------------------------------
@@ -1805,7 +1863,10 @@ create table if not exists public.session_memory_events (
 create index if not exists idx_session_memory_events_session on public.session_memory_events(session_id, created_at desc);
 create index if not exists idx_session_memory_events_parent on public.session_memory_events(parent_event_id);
 create index if not exists idx_session_memory_events_company_agent on public.session_memory_events(company_id, agent_id, created_at desc);
-grant select, insert, update, delete on public.session_memory_events to authenticated, service_role;
+-- isolamento 2026-10-22: memória de sessão (user_input/assistant_output em claro) só service-level
+alter table public.session_memory_events enable row level security;
+revoke all on public.session_memory_events from anon, authenticated;
+grant select, insert, update, delete on public.session_memory_events to service_role;
 
 notify pgrst, 'reload schema';
 

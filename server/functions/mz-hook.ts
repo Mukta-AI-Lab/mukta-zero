@@ -46,10 +46,12 @@
 
 export default async function (req: Request, ctx: { sql: any; getSecret: (n: string) => string | undefined }) {
   const { sql, getSecret } = ctx;
-  // Sem CORS permissivo por reflexo: um webhook é chamado por servidor, não por browser. Mas
-  // permitir OPTIONS/origem não custa nada e evita que alguém teste do console e conclua "quebrado".
+  // Webhook é chamado por servidor, não por browser: CORS só para a allowlist do app (auditoria externa 5.14,
+  // 28/10 — antes "*" incondicional deixava qualquer site ler a resposta usando a chave de quem visitasse).
+  const _allowed = ["https://app.example.com", "https://api.example.com"]; const _o = req.headers.get("origin");
   const CORS: Record<string, string> = {
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": _o && _allowed.includes(_o) ? _o : _allowed[0],
+    "Vary": "Origin",
     "Access-Control-Allow-Headers": "content-type, apikey, authorization, x-mz-hook-key",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
   };

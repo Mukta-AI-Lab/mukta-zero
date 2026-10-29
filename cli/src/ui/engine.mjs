@@ -47,6 +47,7 @@ import { resolveInWorkspace } from "./files.mjs";
 import { workspaceRoot } from "../session.mjs";
 import { getProvider } from "../providers.mjs";
 import { callDirect } from "../llm-direct.mjs";
+import { reportByokCall } from "../obs-report.mjs";
 
 /** Erro-sentinela do cancelamento cooperativo (não é falha, é escolha do usuário). */
 export class Cancelled extends Error {
@@ -117,6 +118,7 @@ export async function run({ prompt, rawText, tab, token, onEvent, attachments = 
     if (!conf) return { ok: false, error: `provedor "${tab.provider}" não configurado (use /provedor)` };
     emit({ type: "phase", phase: `provedor ${conf.name}` });
     const r = await token.race(callDirect(conf, { model: tab.model || conf.default_model, system: assembleSystem(), user: prompt }));
+    reportByokCall({ provider: conf.name, model: r.model, latencyMs: r.latencyMs, usage: r.usage, ok: r.ok, status: r.status });
     return r.ok ? { ok: true, text: r.text } : { ok: false, error: r.error || `HTTP ${r.status}` };
   }
 

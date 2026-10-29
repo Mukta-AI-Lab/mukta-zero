@@ -20,6 +20,7 @@
 // recolor.ts — recolor/rebrand de OOXML (PPTX/DOCX/XLSX): troca cores de marca (srgbClr val="HEX") em TODAS as partes XML
 // preservando conteúdo, estrutura e binários (imagens byte-idênticas). Padrão do Studio (adapt-pptx recolor / retheme). Deno + fflate.
 import { unzipSync, zipSync, strToU8, strFromU8 } from "https://esm.sh/fflate@0.8.2";
+import { safeUnzip } from "./safe-zip.ts"; // teto contra zip bomb (auditoria 5.16)
 
 export interface Recolor { from: string; to: string } // hex 6 dígitos, sem #
 export interface RecolorResult { bytes: Uint8Array; swaps: Record<string, { before: number; after: number }>; parts_recolored: number; images_identical: boolean }
@@ -37,7 +38,7 @@ const unmaskBlips = (masked: string, blips: string[]): string => masked.replace(
 
 /** Troca cores em todas as partes XML de um OOXML (case-insensitive no hex). Binários intocados. Light↔dark = passar os swaps dk1/lt1. */
 export function recolorOoxml(fileBytes: Uint8Array, recolors: Recolor[]): RecolorResult {
-  const zip = unzipSync(fileBytes);
+  const zip = safeUnzip(fileBytes);
   // conta apenas FORA de <a:blip> (fotos com duotone/clrChange ficam de fora da contagem e do swap)
   const count = (obj: Record<string, Uint8Array>, hex: string) => { let n = 0; const re = new RegExp(`srgbClr val="${hex}"`, "gi"); for (const k of Object.keys(obj)) if (isOoxmlXml(k)) n += (maskBlips(strFromU8(obj[k])).masked.match(re) || []).length; return n; };
   const swaps: Record<string, { before: number; after: number }> = {};

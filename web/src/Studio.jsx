@@ -152,9 +152,15 @@ export default function Studio({ supabase, onGenerate }) {
 
   function openPreview() {
     if (!current) return;
-    const w = window.open();
-    w.document.write(current.html);
-    w.document.close();
+    // O HTML é gerado por LLM: nunca roda na origem do app (auditoria externa 5.11, 28/10 — antes document.write
+    // dava ao script gerado a sessão do usuário). A aba nova só tem um iframe sandbox sem allow-same-origin.
+    const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+    const shell = `<!doctype html><html><head><meta charset="utf-8"><title>Prévia</title>` +
+      `<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style></head>` +
+      `<body><iframe sandbox="allow-scripts" referrerpolicy="no-referrer" srcdoc="${esc(current.html)}"></iframe></body></html>`;
+    const url = URL.createObjectURL(new Blob([shell], { type: "text/html" }));
+    window.open(url, "_blank", "noopener,noreferrer");
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
   return (

@@ -46,9 +46,10 @@ function isRetryable(status) {
  * @param {string} opts.user         - user prompt.
  * @param {number} [opts.temperature=0]
  * @param {number} [opts.maxTokens=2048]
- * @returns {Promise<{ok:boolean,status:number,text:string,error:(string|null)}>}
+ * @returns {Promise<{ok:boolean,status:number,text:string,error:(string|null),latencyMs:(number|null),usage:(object|null),model:(string|null)}>}
  *   ok/status reflect the HTTP call; text = choices[0].message.content; error
- *   is a short message on failure (never contains the api_key).
+ *   is a short message on failure (never contains the api_key). latencyMs/usage feed the
+ *   BYOK report to the MZ Admin «Ao vivo» panel (src/obs-report.mjs) — metadata only.
  */
 export async function callDirect(providerConf, { model, system, user, temperature = 0, maxTokens = 2048 } = {}) {
   if (!providerConf || !providerConf.api_key || !providerConf.base_url) {
@@ -103,6 +104,7 @@ export async function callDirect(providerConf, { model, system, user, temperatur
 
   let response;
   let rawText;
+  const t0 = Date.now();
   try {
     ({ response, rawText } = await doFetch());
     // One retry on transient failure (429/5xx).
@@ -112,17 +114,20 @@ export async function callDirect(providerConf, { model, system, user, temperatur
   } catch (err) {
     // Abort/timeout/network — never leak the key; err.message here is fetch/abort text.
     const reason = err && err.name === "AbortError" ? `timeout after ${DEFAULT_TIMEOUT_MS}ms` : err?.message || "network error";
-    return { ok: false, status: 0, text: "", error: reason };
+    return { ok: false, status: 0, text: "", error: reason, latencyMs: Date.now() - t0, usage: null, model: resolvedModel };
   }
+  const latencyMs = Date.now() - t0;
 
   if (!response.ok) {
     const snippet = rawText ? rawText.slice(0, 300) : `HTTP ${response.status}`;
-    return { ok: false, status: response.status, text: "", error: snippet };
+    return { ok: false, status: response.status, text: "", error: snippet, latencyMs, usage: null, model: resolvedModel };
   }
 
   let text = "";
+  let usage = null;
   try {
     const payload = rawText ? JSON.parse(rawText) : null;
+    usage = payload && typeof payload.usage === "object" ? payload.usage : null;
     text =
       (payload &&
         Array.isArray(payload.choices) &&
@@ -135,5 +140,5 @@ export async function callDirect(providerConf, { model, system, user, temperatur
     text = "";
   }
 
-  return { ok: true, status: response.status, text, error: null };
+  return { ok: true, status: response.status, text, error: null, latencyMs, usage, model: resolvedModel };
 }

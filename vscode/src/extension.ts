@@ -58,7 +58,7 @@ async function cmdLogin(output: vscode.OutputChannel): Promise<void> {
   const username = await vscode.window.showInputBox({
     prompt: "Mukta username or email",
     ignoreFocusOut: true,
-    placeHolder: "e.g. herbert or herbert@empresa.com.br",
+    placeHolder: "e.g. ana or ana@empresa.com.br",
   });
   if (!username) return;
 

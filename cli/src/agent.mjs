@@ -209,6 +209,7 @@ export async function generateEdits(authContext, { task, files, feedback = "", a
     // persona de TAREFA (editor) anexada por último — a MESMA identidade que `mz ask`,
     // consistente em todo o MZ (it.31). Sem isto, o editor herdaria a persona da company.
     systemPromptOverride: assembleSystem({ cwd, extraOverride: EDITOR_PERSONA }),
+    intent: "code",
   });
 
   if (!result.ok) {

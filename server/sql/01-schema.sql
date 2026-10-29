@@ -33,6 +33,10 @@ create table if not exists public.llm_models (
   display_name text,
   created_at   timestamptz not null default now()
 );
+-- Colunas que o dispatch usa (ordem da escada e opções do provedor). Viviam só em seeds fora do schema-base, e uma
+-- instalação nova quebrava no 1º chat (auditoria externa 7.3). Idempotente: na instância existente já estão lá.
+alter table public.llm_models add column if not exists priority int not null default 100;
+alter table public.llm_models add column if not exists provider_config jsonb;
 
 create table if not exists public.agent_profiles (
   id           uuid primary key default gen_random_uuid(),

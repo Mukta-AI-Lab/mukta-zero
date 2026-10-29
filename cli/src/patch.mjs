@@ -94,6 +94,7 @@ async function generateEdit(authContext, { relPath, fileContent, spec, repairCon
     agent_id: agentId, company_id: companyId, stream: false,
     client_name: "mz-cli:patch", // FB9: a origem do run precisa chegar ao mz_agent_runs
     system_prompt_override: EDIT_PERSONA, max_tokens: 8192,
+    intent: "code", // gap G3: sem ferramentas nem heurística de documento no servidor
   };
   const call = (accessToken) => invokeJsonEdge({ url: RUN_AGENT_CHAT_URL, accessToken, body });
   let result;

@@ -222,7 +222,7 @@ async function pollAsyncJob(authContext, jobId, { budgetMs = 290000, onPhase = n
  *  - resumeJobId: pula o submit e só faz poll de um job já existente (retomar após timeout do cliente).
  *  - onPhase: callback de progresso por fase.
  */
-export async function askAgent(authContext, { prompt, agentId, companyId, systemPromptOverride = null, sessionId = null, pollBudgetMs = 290000, asyncOnly = false, resumeJobId = null, onPhase = null }) {
+export async function askAgent(authContext, { prompt, agentId, companyId, systemPromptOverride = null, sessionId = null, pollBudgetMs = 290000, asyncOnly = false, resumeJobId = null, onPhase = null, intent = null }) {
   // RESUME: retoma o poll de um job já submetido (não re-submete, não precisa de prompt/company/agent).
   if (resumeJobId) return pollAsyncJob(authContext, resumeJobId, { budgetMs: pollBudgetMs, onPhase });
 
@@ -239,6 +239,9 @@ export async function askAgent(authContext, { prompt, agentId, companyId, system
     // o run-agent-chat faz recall determinístico por session_id+company+agent (sem vazamento cross-sessão,
     // o escopo é server-side). Omitido em generateEdits/plan (one-shot, não são conversa).
     ...(sessionId ? { session_id: sessionId } : {}),
+    // intent "code" (mz agent): o servidor desliga ferramentas e as heurísticas de documento/pesquisa,
+    // que casavam palavras da tarefa e devolviam .docx/HTML no lugar do arquivo (gap G3).
+    ...(intent ? { intent } : {}),
   };
 
   const sub = await submitAsyncJob(authContext, body);

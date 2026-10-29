@@ -41,9 +41,28 @@ export function readFileAsText(file) {
 }
 
 /**
+ * Prefixo de pasta do usuário no bucket: left(sha256(uid), 16) — o MESMO cálculo de mz-office.ts (persistFile) e de
+ * public.mz_storage_prefix() na .107. Desde 2026-10-22 a policy de INSERT do bucket só aceita a pasta própria (ou a
+ * raiz, mantida por compatibilidade até este front estar deployado); storage.prefixes só lista a pasta própria.
+ * Devolve null sem sessão ou sem WebCrypto (o upload cai então na raiz, como antes).
+ */
+export async function storagePrefix(supabase) {
+  try {
+    const { data } = await supabase.auth.getUser();
+    const uid = data?.user?.id;
+    if (!uid || !globalThis.crypto?.subtle) return null;
+    const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(uid));
+    return [...new Uint8Array(h)].map((x) => x.toString(16).padStart(2, '0')).join('').slice(0, 16);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Uploads a file to the 'mz-uploads' bucket in Supabase Storage.
- * The filename is sanitized and prefixed with a timestamp to avoid collisions.
- * 
+ * The filename is sanitized and prefixed with a timestamp to avoid collisions; the object goes under the
+ * user's own folder (`<sha256(uid)[:16]>/<ts>_<name>`), the only folder the bucket policy lets the user write to.
+ *
  * @param {Object} supabase - The initialized Supabase client instance.
  * @param {File} file - The file object to upload.
  * @returns {Promise<{path: string, error: Error|null}>} Object containing the storage path and any error encountered.
@@ -51,9 +70,10 @@ export function readFileAsText(file) {
 export async function uploadFile(supabase, file) {
   // Sanitize filename: replace any character that is not alphanumeric, dot, underscore, or hyphen with '_'
   const safe = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-  
+
   // Create a unique path using current timestamp to prevent overwriting files with the same name
-  const path = Date.now() + '_' + safe;
+  const prefix = await storagePrefix(supabase);
+  const path = (prefix ? prefix + '/' : '') + Date.now() + '_' + safe;
 
   try {
     const { error } = await supabase.storage

@@ -73,17 +73,36 @@
 #
 # ENV IN (optional, passed by the pipeline; all have safe defaults):
 #   MUKTA_REF        instance ref/subdomain -> API_EXTERNAL_URL/SITE_URL
-#   MUKTA_DOMAIN     apex domain for URLs (default mukta.app)
+#   MUKTA_DOMAIN     apex domain for URLs (default example.com)
 #   MUKTA_EDGE_PORT  public Kong port (default 8000) - firewall opens this one
 #   MUKTA_PLAN       starter|standard|pro (reserved; default standard)
+#   MZ_SIGNUP_ABERTO "1" ABRE o cadastro público do GoTrue (/auth/v1/signup com autoconfirm).
+#                    PADRÃO = FECHADO: GOTRUE_DISABLE_SIGNUP=true + GOTRUE_MAILER_AUTOCONFIRM=false
+#                    (mesmo padrão aplicado na .107 em 2026-10-22 — contenção do vazamento entre
+#                    tenants, docs/audits/mz-isolamento-tenant-banco-2026-10-22.md C-3: o signup
+#                    público dava JWT `authenticated` a qualquer um, sem aprovação).
+#                    Com o padrão fechado o cadastro passa SÓ pelos edges signup-request →
+#                    verify-email → approve-signup (admin API com a SERVICE_ROLE_KEY: o usuário
+#                    nasce não-confirmado e BANIDO até a aprovação; o e-mail de validação vai
+#                    pelo Postmark, não pelo mailer do GoTrue — por isso AUTOCONFIRM=false não
+#                    exige SMTP). Esses edges NÃO vêm com o installer: deploy depois com
+#                    `deploy-function`/`deploy-edge-bundle.sh`. Só gera o .env na 1ª execução;
+#                    numa instância existente, edite GOTRUE_DISABLE_SIGNUP/GOTRUE_MAILER_AUTOCONFIRM
+#                    em $STACK/.env e rode `docker compose up -d auth`.
 # =============================================================================
 set -euo pipefail
 
 STACK=/opt/mukta-zero-zero/stack
 PORT="${MUKTA_EDGE_PORT:-8000}"
 REF="${MUKTA_REF:-$(hostname -s 2>/dev/null || echo instance)}"
-DOMAIN="${MUKTA_DOMAIN:-mukta.app}"
+DOMAIN="${MUKTA_DOMAIN:-example.com}"
 PLAN="${MUKTA_PLAN:-standard}"
+# Cadastro público do GoTrue: FECHADO por padrão (ver cabeçalho, MZ_SIGNUP_ABERTO).
+if [ "${MZ_SIGNUP_ABERTO:-0}" = "1" ]; then
+  GOTRUE_DISABLE_SIGNUP=false; GOTRUE_MAILER_AUTOCONFIRM=true
+else
+  GOTRUE_DISABLE_SIGNUP=true; GOTRUE_MAILER_AUTOCONFIRM=false
+fi
 export DEBIAN_FRONTEND=noninteractive
 
 log(){ printf '%s\n' "== $* =="; }
@@ -162,6 +181,9 @@ if [ ! -f "$STACK/.env" ]; then
     echo "PGRST_DB_SCHEMAS=public,storage,graphql_public"
     echo "EDGE_PORT=9000"
     echo "MUKTA_PLAN=${PLAN}"
+    echo "# Cadastro publico do GoTrue (padrao FECHADO; ver MZ_SIGNUP_ABERTO no installer)"
+    echo "GOTRUE_DISABLE_SIGNUP=${GOTRUE_DISABLE_SIGNUP}"
+    echo "GOTRUE_MAILER_AUTOCONFIRM=${GOTRUE_MAILER_AUTOCONFIRM}"
   } > "$STACK/.env"
   chmod 600 "$STACK/.env"
   echo "  generated unique secrets for ref=${REF} (JWT_SECRET 64 hex, ANON+SERVICE HS256)"
@@ -208,12 +230,44 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 
 -- UNLIMITED secrets vault (the vs-Supabase differentiator; edge-runtime loads it).
+-- ENCRYPTED AT REST (external audit 5.3/5.14, 2026-10-28): values live in vault.secrets_store as
+-- pgp_sym_encrypt(AES-256); vault.secrets is a decrypting VIEW with the same columns as before. The key is a
+-- file in the data directory (mz_vault.key), read by pg_read_file — it is NOT in pg_dump. BACK IT UP SEPARATELY:
+-- losing it means losing every secret.
 CREATE SCHEMA IF NOT EXISTS vault AUTHORIZATION supabase_admin;
-CREATE TABLE IF NOT EXISTS vault.secrets (
-  name text PRIMARY KEY, value text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
-CREATE OR REPLACE FUNCTION vault.set_secret(p_name text, p_value text) RETURNS void
-  LANGUAGE sql AS $fn$ INSERT INTO vault.secrets(name,value) VALUES(p_name,p_value)
-    ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=now() $fn$;
+DO $$ BEGIN
+  IF pg_stat_file('mz_vault.key', true) IS NULL THEN
+    EXECUTE format('COPY (SELECT %L) TO %L', encode(extensions.gen_random_bytes(48), 'base64'),
+                   current_setting('data_directory') || '/mz_vault.key');
+  END IF;
+END $$;
+CREATE OR REPLACE FUNCTION vault._key() RETURNS text LANGUAGE sql STABLE SET search_path = pg_catalog
+  AS $fn$ SELECT btrim(pg_read_file('mz_vault.key'), E' \n\r\t') $fn$;
+REVOKE ALL ON FUNCTION vault._key() FROM PUBLIC;
+CREATE TABLE IF NOT EXISTS vault.secrets_store (
+  name text PRIMARY KEY, value_enc bytea NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
+REVOKE ALL ON vault.secrets_store FROM PUBLIC;
+CREATE OR REPLACE VIEW vault.secrets AS
+  SELECT st.name, extensions.pgp_sym_decrypt(st.value_enc, vault._key()) AS value, st.updated_at FROM vault.secrets_store st;
+REVOKE ALL ON vault.secrets FROM PUBLIC;
+CREATE OR REPLACE FUNCTION vault._secrets_write() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $fn$
+BEGIN
+  IF tg_op = 'DELETE' THEN DELETE FROM vault.secrets_store WHERE name = old.name; RETURN old; END IF;
+  IF new.name IS NULL OR new.value IS NULL THEN RAISE EXCEPTION 'vault.secrets: name and value are required'; END IF;
+  IF tg_op = 'UPDATE' AND new.name IS DISTINCT FROM old.name THEN DELETE FROM vault.secrets_store WHERE name = old.name; END IF;
+  INSERT INTO vault.secrets_store (name, value_enc, updated_at)
+  VALUES (new.name, extensions.pgp_sym_encrypt(new.value, vault._key(), 'cipher-algo=aes256, s2k-mode=1'), now())
+  ON CONFLICT (name) DO UPDATE SET value_enc = excluded.value_enc, updated_at = now();
+  RETURN new;
+END $fn$;
+REVOKE ALL ON FUNCTION vault._secrets_write() FROM PUBLIC;
+DROP TRIGGER IF EXISTS secrets_write ON vault.secrets;
+CREATE TRIGGER secrets_write INSTEAD OF INSERT OR UPDATE OR DELETE ON vault.secrets FOR EACH ROW EXECUTE FUNCTION vault._secrets_write();
+CREATE OR REPLACE FUNCTION vault.set_secret(p_name text, p_value text) RETURNS void LANGUAGE sql SET search_path = pg_catalog AS $fn$
+  INSERT INTO vault.secrets_store (name, value_enc, updated_at)
+  VALUES (p_name, extensions.pgp_sym_encrypt(p_value, vault._key(), 'cipher-algo=aes256, s2k-mode=1'), now())
+  ON CONFLICT (name) DO UPDATE SET value_enc = excluded.value_enc, updated_at = now() $fn$;
+REVOKE ALL ON FUNCTION vault.set_secret(text, text) FROM PUBLIC;
 
 GRANT USAGE ON SCHEMA public, storage, graphql_public, extensions TO anon, authenticated, service_role;
 GRANT ALL ON SCHEMA storage TO supabase_storage_admin;
@@ -275,20 +329,53 @@ async function loadSecrets() {
   } catch (_) { secretCount = -1; }
 }
 await loadSecrets();
+// faltar ou quebrar, o runtime segue exatamente como antes (obs = null). MZ_OBS_LEDGER=0 desliga.
+let obs: any = null;
+try { const m = await import("./_obs/ledger.ts"); if (m.install(sql)) obs = m; }
+catch (e) { console.error("[mz-obs] módulo indisponível, runtime sem observabilidade:", e instanceof Error ? e.message : String(e)); }
+
+// Requisição que passou pelo gateway (Kong acrescenta X-Forwarded-*). Rotas administrativas do runtime só
+// atendem chamada INTERNA (docker exec / rede do stack) — auditoria externa 5.13, 28/10.
+const viaGateway = (req: Request) => req.headers.has("x-forwarded-for") || req.headers.has("x-forwarded-host") || req.headers.has("x-real-ip");
+function sameToken(a: string, b: string): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  let d = 0; for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
+// Nomes que NÃO são edges: módulos internos (`_obs`, `_shared`) e o próprio runtime.
+const NOT_A_FUNCTION = /^(_|edge-runtime$)/;
+
 Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
   const url = new URL(req.url);
-  if (url.pathname === "/__health" || url.pathname === "/functions/v1/__health")
-    return Response.json({ ok: true, runtime: "mukta-edge", deno: Deno.version.deno, secrets_loaded: secretCount });
-  if (url.pathname === "/__reload") { await loadSecrets(); modCache.clear(); return Response.json({ reloaded: true, secrets_loaded: secretCount }); }
+  if (url.pathname === "/__health" || url.pathname === "/functions/v1/__health") {
+    // pelo gateway, só o estado; contagem de segredos apenas na chamada interna
+    if (viaGateway(req)) return Response.json({ ok: true, runtime: "mukta-edge", obs: !!obs });
+    return Response.json({ ok: true, runtime: "mukta-edge", deno: Deno.version.deno, secrets_loaded: secretCount, obs: !!obs });
+  }
+  if (url.pathname === "/__reload" || url.pathname === "/functions/v1/__reload") {
+    // /__reload recarrega segredos e esvazia o cache de módulos: interno E com token (MZ_RUNTIME_ADMIN_TOKEN no cofre).
+    const want = Deno.env.get("MZ_RUNTIME_ADMIN_TOKEN") || "";
+    if (viaGateway(req) || !sameToken(req.headers.get("x-mz-runtime-token") || "", want)) return new Response("not found", { status: 404 });
+    await loadSecrets(); modCache.clear(); obs?.obsReload();
+    return Response.json({ reloaded: true, secrets_loaded: secretCount });
+  }
   const m = url.pathname.match(/^\/(?:functions\/v1\/)?([\w-]+)\/?$/);
-  if (!m) return new Response("mukta edge runtime", { status: 200 });
+  if (!m || NOT_A_FUNCTION.test(m[1])) return new Response("mukta edge runtime", { status: 200 });
   try {
     let mod = modCache.get(m[1]);
     if (!mod) { mod = await import("file:///functions/" + m[1] + ".ts"); modCache.set(m[1], mod); }
     const handler = mod.default;
     if (typeof handler !== "function") return new Response("function has no default export", { status: 500 });
-    return await handler(req, { sql, getSecret: (n: string) => Deno.env.get(n) });
-  } catch (e) { return new Response("function error: " + (e instanceof Error ? e.message : String(e)), { status: 500 }); }
+    const run = () => handler(req, { sql, getSecret: (n: string) => Deno.env.get(n) });
+    return obs ? await obs.runWithObs(req, m[1], run) : await run();
+  } catch (e) {
+    // detalhe só no log; ao cliente, erro genérico com id de correlação
+    const ref = crypto.randomUUID().slice(0, 8);
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[mukta-edge] ${m[1]} falhou ref=${ref}: ${msg.slice(0, 300)}`);
+    if (/Module not found|Cannot find module|No such file/i.test(msg)) return new Response("function not found", { status: 404 });
+    return new Response(JSON.stringify({ error: "function_error", ref }), { status: 500, headers: { "content-type": "application/json" } });
+  }
 });
 TS
 
@@ -307,28 +394,31 @@ services:
   - name: auth-v1
     url: http://auth:9999/
     routes: [{ name: auth-v1-route, strip_path: true, paths: ["/auth/v1/"] }]
-    plugins: [{ name: cors }]
+    plugins: [{ name: cors, config: { origins: ["${SITE_URL}", "${API_EXTERNAL_URL}"] } }, { name: rate-limiting, config: { minute: 60, policy: local, limit_by: ip, fault_tolerant: true } }]
   - name: rest-v1
     url: http://rest:3000/
     routes: [{ name: rest-v1-route, strip_path: true, paths: ["/rest/v1/"] }]
     plugins:
-      - name: cors
+      - { name: cors, config: { origins: ["${SITE_URL}", "${API_EXTERNAL_URL}"] } }
       - { name: key-auth, config: { hide_credentials: true } }
   - name: storage-v1
     url: http://storage:5000/
     routes: [{ name: storage-v1-route, strip_path: true, paths: ["/storage/v1/"] }]
-    plugins: [{ name: cors }]
+    plugins: [{ name: cors, config: { origins: ["${SITE_URL}", "${API_EXTERNAL_URL}"] } }]
   - name: realtime-v1
     url: http://realtime:4000/socket/
     routes: [{ name: realtime-v1-route, strip_path: true, paths: ["/realtime/v1/"] }]
-    plugins: [{ name: cors }]
+    plugins: [{ name: cors, config: { origins: ["${SITE_URL}", "${API_EXTERNAL_URL}"] } }]
   - name: functions-v1
     url: http://edge-runtime:9000/
     routes: [{ name: functions-v1-route, strip_path: true, paths: ["/functions/v1/"] }]
-    plugins: [{ name: cors }]
+    plugins: [{ name: cors, config: { origins: ["${SITE_URL}", "${API_EXTERNAL_URL}"] } }, { name: rate-limiting, config: { minute: 300, policy: local, limit_by: ip, fault_tolerant: true } }]
   - name: health
     url: http://edge-runtime:9000/__health
     routes: [{ name: health-route, strip_path: true, paths: ["/__health"] }]
+# rate limit por IP real (KONG_REAL_IP_HEADER/KONG_TRUSTED_IPS no compose)
+plugins:
+  - { name: rate-limiting, config: { minute: 1200, policy: local, limit_by: ip, fault_tolerant: true } }
 consumers:
   - username: anon
     keyauth_credentials: [{ key: "${ANON_KEY}" }]
@@ -339,7 +429,7 @@ acls:
   - { consumer: service_role, group: admin }
 KONG
 # Kong DB-less does NOT expand env vars in kong.yml -> render with envsubst.
-envsubst '${ANON_KEY} ${SERVICE_ROLE_KEY}' < "$STACK/kong/kong.yml.tpl" > "$STACK/kong/kong.yml"
+envsubst '${ANON_KEY} ${SERVICE_ROLE_KEY} ${SITE_URL} ${API_EXTERNAL_URL}' < "$STACK/kong/kong.yml.tpl" > "$STACK/kong/kong.yml"
 
 # --- docker-compose.yml : full Supabase mesh, EMPTY-instance shape -----------
 cat > "$STACK/docker-compose.yml" <<'COMPOSE'
@@ -391,7 +481,16 @@ services:
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_ISSUER: ${JWT_ISSUER:-supabase}
       GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
-      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      # Isolamento de tenant (2026-10-22): cadastro SÓ pelo edge signup-request (admin API, nasce banido
+      # até aprovação). O /auth/v1/signup público dava JWT authenticated sem aprovação a qualquer um.
+      # Valores vêm do .env (gerados por MZ_SIGNUP_ABERTO); sem eles no .env, o default é FECHADO.
+      GOTRUE_MAILER_AUTOCONFIRM: ${GOTRUE_MAILER_AUTOCONFIRM:-false}
+      GOTRUE_DISABLE_SIGNUP: ${GOTRUE_DISABLE_SIGNUP:-true}
+      # Auditoria externa 5.20: senha mínima, rate limit por IP real (X-Real-IP do Kong), rotação de refresh token.
+      GOTRUE_PASSWORD_MIN_LENGTH: "10"
+      GOTRUE_RATE_LIMIT_HEADER: X-Real-IP
+      GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED: "true"
+      GOTRUE_SECURITY_REFRESH_TOKEN_REUSE_INTERVAL: "10"
       GOTRUE_EXTERNAL_GOOGLE_ENABLED: "false"
     networks: [sb]
   rest:
@@ -486,7 +585,11 @@ services:
       KONG_DATABASE: "off"
       KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
       KONG_DNS_ORDER: LAST,A,CNAME
-      KONG_PLUGINS: request-transformer,cors,key-auth,acl
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,rate-limiting
+      # Só confia no CF-Connecting-IP vindo de faixa Cloudflare; sem Cloudflare na frente, vale o IP da conexão.
+      KONG_TRUSTED_IPS: 173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22
+      KONG_REAL_IP_HEADER: CF-Connecting-IP
+      KONG_REAL_IP_RECURSIVE: "on"
     volumes: ["./kong/kong.yml:/home/kong/kong.yml:ro"]
     ports: ["0.0.0.0:__PORT__:8000"]
     networks: [sb]
@@ -519,6 +622,14 @@ for i in $(seq 1 30); do
   [ "$st" = "healthy" ] && break
   sleep 4
 done
+
+# As edges leem JWT_SECRET/JWT_ISSUER/ANON_KEY do cofre (cifrado). Sem isto toda edge autenticada dava 401/500.
+for kv in "JWT_SECRET=${JWT_SECRET}" "JWT_ISSUER=${JWT_ISSUER:-supabase}" "ANON_KEY=${ANON_KEY}"; do
+  # stdin (não -c): o psql só interpola :'k'/:'v' em comando lido da entrada
+  echo "select vault.set_secret(:'k', :'v');" | docker exec -i mz-db psql -U postgres -v ON_ERROR_STOP=1 -q -v k="${kv%%=*}" -v v="${kv#*=}" >/dev/null
+done
+docker restart mz-edge >/dev/null
+echo "  vault: JWT_SECRET, JWT_ISSUER, ANON_KEY gravados (cifrados); guarde $STACK/data/db/mz_vault.key fora da máquina"
 
 # -----------------------------------------------------------------------------
 log "[8/8] healthcheck (Kong :${PORT}/__health)"

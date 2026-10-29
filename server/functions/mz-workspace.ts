@@ -22,16 +22,10 @@
 // mz_project_files (owner por auth.uid); aqui o edge valida o JWT e escopa por user_id explícito (o sql do
 // mukta-edge não tem auth.uid). "Obter dados da internet" = via ask_project (o agente tem web_search/scrape_url).
 
+import { verifyJwtHs256 } from "./_shared/tenant-guard.ts";
 function b64urlToBytes(s: string): Uint8Array { s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; const bin = atob(s); const b = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i); return b; }
-async function verifyJwt(token: string, secret: string): Promise<any> {
-  const p = token.split("."); if (p.length !== 3) throw new Error("jwt malformado");
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
-  if (!await crypto.subtle.verify("HMAC", key, b64urlToBytes(p[2]), new TextEncoder().encode(`${p[0]}.${p[1]}`))) throw new Error("assinatura inválida");
-  const c = JSON.parse(new TextDecoder().decode(b64urlToBytes(p[1])));
-  if (c.exp && Date.now() / 1000 > c.exp) throw new Error("token expirado");
-  if (!c.sub) throw new Error("sem sub");
-  return c;
-}
+// Verificador ÚNICO (exp obrigatório, iss/aud/alg conferidos) — auditoria externa 5.22, 28/10.
+const verifyJwt = async (t: string, s: string) => { const c = await verifyJwtHs256(t, s); if (!c.sub) throw new Error("sem sub"); return c; };
 // parser CSV robusto (aspas, vírgulas dentro de aspas, "" escape, CRLF)
 function parseCSV(text: string): { headers: string[]; rows: string[][] } {
   const rows: string[][] = []; let cur: string[] = []; let field = ""; let inQ = false;
@@ -47,7 +41,7 @@ function parseCSV(text: string): { headers: string[]; rows: string[][] } {
 export default async function (req: Request, ctx: { sql: any; getSecret: (n: string) => string | undefined }) {
   const { sql, getSecret } = ctx;
   const _allowed = ["https://app.example.com", "https://api.example.com"]; const _o = req.headers.get("origin");
-  const CORS: Record<string, string> = { "Access-Control-Allow-Origin": !_o ? "*" : (_allowed.includes(_o) ? _o : _allowed[0]), "Access-Control-Allow-Headers": "apikey, content-type, authorization", "Access-Control-Allow-Methods": "POST, OPTIONS", "Vary": "Origin" };
+  const CORS: Record<string, string> = { "Access-Control-Allow-Origin": _o && _allowed.includes(_o) ? _o : _allowed[0], "Access-Control-Allow-Headers": "apikey, content-type, authorization", "Access-Control-Allow-Methods": "POST, OPTIONS", "Vary": "Origin" };
   const j = (o: unknown, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { ...CORS, "Content-Type": "application/json" } });
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return j({ error: "POST only" }, 405);

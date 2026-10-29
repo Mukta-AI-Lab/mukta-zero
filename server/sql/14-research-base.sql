@@ -96,6 +96,8 @@ drop policy if exists p_mz_rc on public.mz_research_chunks;
 create policy p_mz_rn on public.mz_research_nodes  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy p_mz_rc on public.mz_research_chunks for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 grant select, insert, update, delete on public.mz_research_nodes, public.mz_research_chunks to authenticated;
+-- isolamento 2026-10-22: sem PUBLIC/anon; a guarda de usuário (p_user_id = auth.uid()) está na migration 20261022120400
+revoke all on function public.mz_match_research_chunks(uuid,uuid,text,vector,int,uuid) from public, anon;
 grant execute on function public.mz_match_research_chunks(uuid,uuid,text,vector,int,uuid) to authenticated, service_role;
 
 -- (5) Perímetro congelado relê barato entre fases (após reciclagem de isolate)

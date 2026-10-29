@@ -20,6 +20,7 @@
 // mz-deck — orquestrador fino brief→deck (item 3b). Contrato mukta-edge (req, ctx). NÃO edita o chat-core nem duplica dispatch.
 // Fluxo (empacota o smoke provado): fetch slot_schema do template_id (ctx.sql) → PLANNER via run-agent-chat (LLM já existe lá)
 // → parse slots → compose via mz-office (compose_pptx) → devolve signed_url. Auth: JWT do user (forwarded internamente).
+import { verifyJwtHs256 } from "./_shared/tenant-guard.ts";
 const KONG_FN = "http://kong:8000/functions/v1";
 
 function extractJson(txt: string): any {
@@ -32,13 +33,17 @@ function extractJson(txt: string): any {
 export default async function (req: Request, ctx: any) {
   // CORS whitelist (CLAUDE.md P0: '*' proibido). CLI não manda Origin → liberado (auth por JWT); browser só de domínio confiável.
   const _allowed = ["https://app.example.com", "https://api.example.com"]; const _o = req.headers.get("origin");
-  const CORS: Record<string, string> = { "Access-Control-Allow-Origin": !_o ? "*" : (_allowed.includes(_o) ? _o : _allowed[0]), "Access-Control-Allow-Headers": "apikey, content-type, authorization", "Access-Control-Allow-Methods": "POST, OPTIONS", "Vary": "Origin" };
+  const CORS: Record<string, string> = { "Access-Control-Allow-Origin": _o && _allowed.includes(_o) ? _o : _allowed[0], "Access-Control-Allow-Headers": "apikey, content-type, authorization", "Access-Control-Allow-Methods": "POST, OPTIONS", "Vary": "Origin" };
   const j = (o: unknown, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { ...CORS, "Content-Type": "application/json" } });
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return j({ error: "POST only" }, 405);
   const apikey = req.headers.get("apikey") || "";
   const authz = req.headers.get("authorization") || "";
   if (!authz.toLowerCase().startsWith("bearer ")) return j({ error: "Authorization Bearer (JWT do user) requerido" }, 401);
+  // 5.18 (auditoria externa, 28/10): confere a assinatura AQUI também — antes só o prefixo, e o slot_schema era lido
+  // do banco (ctx.sql, superusuário) antes de qualquer edge validar o token.
+  try { await verifyJwtHs256(authz.slice(7).trim(), ctx?.getSecret?.("JWT_SECRET") || ctx?.getSecret?.("GOTRUE_JWT_SECRET") || ""); }
+  catch { return j({ error: "unauthorized" }, 401); }
   const fwd = { apikey, Authorization: authz, "content-type": "application/json" };
   try {
     const body = await req.json();

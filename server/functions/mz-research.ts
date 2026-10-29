@@ -22,6 +22,8 @@
 // executa só a sua fase e dispara fire-and-forget a próxima (self-call via kong) → nenhum request estoura o CF/isolate.
 // Fases: P0 perímetro → P1 decompose → P2 swarm → P3 facts+verify → P4 síntese seção-a-seção → P5 doc → done.
 // SSOT: modelo via llm_models (ladder), embedding via internal_config + get_vault_secret. Zero slug hardcoded.
+// 🔒 Isolamento entre tenants (2026-10-22): import ESTÁTICO → deploy SÓ por bundle (deploy-edge-bundle.sh mz-research).
+import { corsHeaders, jobOwnedBy, ownsConversation, verifyJwtHs256 } from "./_shared/tenant-guard.ts";
 
 // SELO DE DATA/HORA no nome do ficheiro gerado — regra do Herbert (2026-08-10). Todo estudo saía
 // como `estudo.docx`, logo dez estudos numa pasta eram indistinguíveis e o browser renomeava para
@@ -40,14 +42,18 @@ const PUBLIC_STORAGE = "https://api.example.com/storage/v1";
 
 // ── auth ──
 function b64urlToBytes(s: string): Uint8Array { s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; const bin = atob(s); const b = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i); return b; }
-async function verifyJwt(token: string, secret: string): Promise<any> {
-  const p = token.split("."); if (p.length !== 3) throw new Error("jwt malformado");
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
-  if (!await crypto.subtle.verify("HMAC", key, b64urlToBytes(p[2]), new TextEncoder().encode(`${p[0]}.${p[1]}`))) throw new Error("assinatura inválida");
-  const c = JSON.parse(new TextDecoder().decode(b64urlToBytes(p[1])));
-  if (c.exp && Date.now() / 1000 > c.exp) throw new Error("token expirado");
-  if (!c.sub) throw new Error("sem sub");
-  return c;
+// Verificador ÚNICO (exp obrigatório, iss/aud/alg conferidos) — auditoria externa 5.22, 28/10.
+const verifyJwt = async (t: string, s: string) => { const c = await verifyJwtHs256(t, s); if (!c.sub) throw new Error("sem sub"); return c; };
+
+// 💰 CUSTO DE PROVEDOR na plataforma Mukta (Herbert 2026-10-08: "a chave é da Mukta"). Só VISIBILIDADE do custo
+// interno (tenant vazio → empresa de plataforma); NÃO altera a cobrança do usuário (mz_charge_run abaixo segue igual).
+// Import DINÂMICO de propósito: com bundle (esbuild) o módulo é embutido; num deploy cru single-file o import falha,
+// é capturado e só o registro fica desligado — a função nunca quebra por causa disso. Fire-and-forget.
+let _mzCostWarn = 0;
+function mzProviderCost(a: Record<string, unknown>): void {
+  import("./_shared/record-llm-usage.mjs")
+    .then((m: any) => m.recordMzProviderCost(a))
+    .catch((e) => { if (_mzCostWarn++ < 3) console.error("[mz-provider-cost] módulo de registro indisponível (deploy sem bundle?):", String((e as Error)?.message || e).slice(0, 160)); });
 }
 
 // ── SSOT LLM (ladder) + embedding ──
@@ -78,13 +84,16 @@ async function llmText(sql: any, getSecret: any, ladder: any[], msgs: any[], tem
     if (!key) continue;
     try {
       const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), timeoutMs); // timeout p/ falhar-rápido → failover
+      const t0 = Date.now();
       const resp = await fetch(`${String(m.base_url).replace(/\/+$/, "")}/chat/completions`, {
         method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
         body: JSON.stringify({ model: m.model_slug, messages: msgs, temperature: temp, max_tokens: maxTok, ...(m.provider_config ? { provider: m.provider_config } : {}) }),
         signal: ctrl.signal,
       }).finally(() => clearTimeout(to));
-      if (!resp.ok) continue;
-      const parsed = JSON.parse(await resp.text());
+      if (!resp.ok) { mzProviderCost({ module: "mz-research", provider: m.provider, baseUrl: m.base_url, modelId: m.model_slug, ok: false, latencyMs: Date.now() - t0, metadata: { http_status: resp.status } }); continue; }
+      const rtext = await resp.text();
+      mzProviderCost({ module: "mz-research", provider: m.provider, baseUrl: m.base_url, modelId: m.model_slug, responseText: rtext, ok: true, latencyMs: Date.now() - t0 });
+      const parsed = JSON.parse(rtext);
       const c = parsed?.choices?.[0]?.message?.content;
       const toks = Number(parsed?.usage?.total_tokens) || 0;
       // in/out SEPARADOS: só `total_tokens` não permite cobrar, porque entrada e saída têm preços
@@ -149,8 +158,10 @@ async function embed(sql: any, getSecret: any, input: string): Promise<number[] 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 18000); // embed NAO pode travar a fase
+      const et0 = Date.now();
       const er = await fetch(`${ebase.replace(/\/+$/, "")}/embeddings`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${ekey}` }, body: JSON.stringify({ model: emodel, input: input.slice(0, 8000), dimensions: edim }), signal: ctrl.signal }).finally(() => clearTimeout(to));
       const ej: any = await er.json().catch(() => ({}));
+      mzProviderCost({ module: "mz-research.embeddings", baseUrl: ebase, modelId: emodel, response: ej, ok: er.ok, latencyMs: Date.now() - et0 });
       const vec = ej?.data?.[0]?.embedding;
       if (Array.isArray(vec) && vec.length) return vec;
     } catch { /* tenta de novo */ }
@@ -303,8 +314,7 @@ function fireAdvance(jobId: string, phase: string, authz: string, apikey: string
 
 export default async function (req: Request, ctx: { sql: any; getSecret: (n: string) => string | undefined }) {
   const { sql, getSecret } = ctx;
-  const _allowed = ["https://app.example.com", "https://api.example.com"]; const _o = req.headers.get("origin");
-  const CORS: Record<string, string> = { "Access-Control-Allow-Origin": !_o ? "*" : (_allowed.includes(_o) ? _o : _allowed[0]), "Access-Control-Allow-Headers": "apikey, content-type, authorization", "Access-Control-Allow-Methods": "POST, OPTIONS", "Vary": "Origin" };
+  const CORS = corsHeaders(req);
   const j = (o: unknown, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { ...CORS, "Content-Type": "application/json" } });
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return j({ error: "POST only" }, 405);
@@ -328,7 +338,8 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
     let r: any[] = [];
     try { r = await sql`select status, result, error, user_id, updated_at, phase, phases, perimeter from public.mz_jobs where id = ${id} limit 1`; } catch { /* */ }
     if (!r.length) return j({ status: "not_found" }, 404);
-    if (r[0].user_id && r[0].user_id !== userId) return j({ error: "forbidden" }, 403);
+    // Dono ESTRITO: job com user_id nulo não é legível por ninguém (antes falhava aberto — auditoria M1).
+    if (!jobOwnedBy(r[0].user_id, userId)) return j({ error: "forbidden" }, 403);
     const row = r[0];
     const stalledMs = Date.now() - new Date(row.updated_at).getTime();
     const curPhase = row.result?.phase_state?.phase;
@@ -370,7 +381,9 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
   try { const fr = await sql`select public.get_internal_config('research_pipeline_v2_enabled') as v`; if (fr[0]?.v !== "true") return j({ error: "deep_research_disabled", detail: "pipeline v2 desligado (kill-switch)" }, 403); } catch { return j({ error: "deep_research_disabled" }, 403); }
   const prompt = String((body.prompt || (Array.isArray(body.messages) ? body.messages[body.messages.length - 1]?.content : "")) || "").trim();
   if (!prompt) return j({ error: "prompt requerido" }, 400);
-  const sessionId = typeof body.session_id === "string" ? body.session_id : null;
+  // session_id do corpo só é guardado no job se a conversa for DO usuário (auditoria B4/M2): a resposta final
+  // é gravada em mz_messages com esse id. Conversa alheia/inexistente → a pesquisa roda sem gravar na conversa.
+  const sessionId = typeof body.session_id === "string" && await ownsConversation(sql, userId, body.session_id) ? body.session_id : null;
   let jobId: string;
   try {
     const jr = await sql`insert into public.mz_jobs (user_id, kind, status, input, result, phase) values (${userId}::uuid, 'deep_research', 'running', ${{ prompt, session_id: sessionId }}, ${{ phase_state: { phase: "P0", at: new Date().toISOString() } }}, 'submitted') returning id`;
@@ -628,7 +641,8 @@ async function runPhase(ctx: any, job: any, phase: string, authz: string, apikey
     // PERSISTE a resposta na conversa (mz_messages) — robusto a refresh: o front resume relê a conversa. Best-effort (igual mz-async).
     try {
       const conv = (await sql`select input->>'session_id' as s from public.mz_jobs where id=${job.id}`)[0]?.s;
-      if (conv && responseText.trim()) await sql`insert into public.mz_messages (user_id, conversation_id, role, content) values (${uid}::uuid, ${conv}::uuid, 'assistant', ${responseText})`;
+      // `where exists`: só grava se a conversa for do dono do job (defesa em profundidade além do submit).
+      if (conv && responseText.trim()) await sql`insert into public.mz_messages (user_id, conversation_id, role, content) select ${uid}::uuid, ${conv}::uuid, 'assistant', ${responseText} where exists (select 1 from public.mz_conversations where id = ${conv}::uuid and user_id = ${uid}::uuid)`;
     } catch { /* */ }
     // OBSERVABILIDADE: grava o run de deep-research em mz_agent_runs → runs+tokens+custo aparecem na Obs e no Control Tower
     // (antes o deep-research era INVISÍVEL nas duas telas). tokens_acc acumulado pelo llmText ao longo das fases.

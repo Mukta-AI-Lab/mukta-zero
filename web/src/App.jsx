@@ -44,6 +44,7 @@ import { uploadFile } from "./lib/upload.js";
 import { useLang, useT, LANG_NAMES, LANGS } from "./lib/i18n.jsx";
 import { useTheme } from "./lib/theme.jsx";
 import { parseHash, writeHash } from "./lib/router.js";
+import { usePresence } from "./lib/presence.js";
 import config from "./config.js";
 
 const supabase = createClient(config.SUPABASE_URL, config.ANON_KEY);
@@ -115,6 +116,9 @@ export default function App() {
   const { pref: themePref, cyclePref: cycleTheme } = useTheme();
   const t = useT(STRINGS);
   const [session, setSession] = useState(null);
+  // A sessão chega ASSÍNCRONA (getSession). Sem esta marca, a 1ª pintura via session=null e expulsava do #/admin
+  // quem ESTAVA logado — link direto para o Admin sempre caía no chat (achado no UAT do painel «Ao vivo», 23/10).
+  const [authReady, setAuthReady] = useState(false);
   const [error, setError] = useState("");
   const [noticeKind, setNoticeKind] = useState("error"); // "error" | "success" — sucesso e falha NÃO podem parecer iguais
   const [busy, setBusy] = useState(false);
@@ -154,7 +158,7 @@ export default function App() {
     : `Você é o Mukta Zero, o agente autônomo da Mukta. Responda e gere TODO o conteúdo em ${LANG_NAMES[contentLang] || "português"} (preferência de idioma de conteúdo do usuário), independentemente do idioma da UI ou do pedido.`;
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
+    supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setAuthReady(true); });
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, s) => {
       setSession(s);
       if (s) setShowLogin(false);
@@ -172,17 +176,21 @@ export default function App() {
     } catch { /* silencioso */ }
   };
 
+  usePresence(supabase, session?.user?.id);
+
   useEffect(() => {
     if (session) {
       loadConversations();
       loadProjects();
-      supabase.rpc("is_mz_admin").then(({ data }) => setIsAdmin(data === true)).catch(() => setIsAdmin(false));
+      supabase.rpc("is_mz_admin")
+        .then(({ data }) => { const a = data === true; setIsAdmin(a); if (!a) setView((v) => (v === "admin" ? "chat" : v)); })
+        .catch(() => { setIsAdmin(false); setView((v) => (v === "admin" ? "chat" : v)); });
       refreshWallet();
     } else {
       setConversations([]); setMessages([]); setCurrentId(null); setIsAdmin(false); setWalletTotal(null);
-      if (view === "admin") setView("chat");
+      if (authReady && view === "admin") setView("chat");
     }
-  }, [session]);
+  }, [session, authReady]);
 
   // Retorno do provedor de pagamento (opcional, ver lib/payments.js)
   useEffect(() => {

@@ -34,12 +34,14 @@
  *
  *   node mz-cli/test/telemetry-privacy-check.mjs
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
-const src = readFileSync(path.join(dir, "..", "instance", "run-agent-chat.ts"), "utf8");
+// repo privado: mz-cli/instance · pacote público: server/functions
+const inst = [path.join(dir, "..", "instance"), path.join(dir, "..", "..", "server", "functions")].find((p) => existsSync(p));
+const src = readFileSync(path.join(inst, "run-agent-chat.ts"), "utf8");
 const front = readFileSync(path.join(dir, "..", "..", "mz-web", "src", "Observability.jsx"), "utf8");
 
 const log = [];

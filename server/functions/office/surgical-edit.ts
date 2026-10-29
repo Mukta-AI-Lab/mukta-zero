@@ -20,6 +20,7 @@
 // surgical-edit.ts — edição PONTUAL de DOCX/PPTX preservando toda a estrutura (padrão do Studio: mexe só no conteúdo de <w:t>/<a:t>).
 // Para texto multi-run (que atravessa vários <w:r>), usar o casamento tolerante do _shared/ooxml-engine.ts (a portar). Aqui: caso single-run (maioria).
 import { unzipSync, zipSync, strToU8, strFromU8 } from "https://esm.sh/fflate@0.8.2";
+import { safeUnzip } from "./safe-zip.ts"; // teto contra zip bomb (auditoria 5.16)
 
 export interface SurgicalEdit { from: string; to: string }
 export interface SurgicalResult { bytes: Uint8Array; subs: number; struct_identical: boolean; texts_changed: number; texts_intact: number; other_parts_identical: boolean }
@@ -28,7 +29,7 @@ export interface SurgicalResult { bytes: Uint8Array; subs: number; struct_identi
 export function surgicalEdit(fileBytes: Uint8Array, edits: SurgicalEdit[], opts?: { xmlPath?: string; tag?: "w:t" | "a:t" }): SurgicalResult {
   const xmlPath = opts?.xmlPath ?? "word/document.xml";
   const tag = opts?.tag ?? "w:t";
-  const zip = unzipSync(fileBytes);
+  const zip = safeUnzip(fileBytes);
   const before = strFromU8(zip[xmlPath]);
   const re = new RegExp(`(<${tag}[^>]*>)([^<]*)(</${tag}>)`, "g");
   const texts = (s: string) => (s.match(re) || []).map((m) => m.replace(/<[^>]*>/g, ""));

@@ -18,6 +18,7 @@
 // licence is required: licensing@mukta.app
 // Full terms: AI-USAGE-NOTICE.md and LICENSE.md
 import { unzipSync } from "https://esm.sh/fflate@0.8.2";
+import { safeUnzip } from "./safe-zip.ts"; // teto contra zip bomb (auditoria 5.16)
 import { XMLParser } from "https://esm.sh/fast-xml-parser@4.5.1";
 
 export interface DocxBlock {
@@ -181,7 +182,7 @@ export function getHeadingLevel(styleVal: string): number | null {
  */
 export function parseDocxToBlocks(buffer: Uint8Array): DocxBlock[] {
     // 1. Unzip the file
-    const unzipped = unzipSync(buffer);
+    const unzipped = safeUnzip(buffer);
 
     // 2. Extract document.xml
     const docXmlKey = Object.keys(unzipped).find((k) => k === "word/document.xml");

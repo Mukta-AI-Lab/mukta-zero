@@ -25,17 +25,56 @@ import { zipSync, unzipSync, strFromU8 } from "https://esm.sh/fflate@0.8.2";
 import { parseDocxToBlocks } from "./office/docx-parser.ts";
 import { buildPptxVisualMap, buildVisualMapSummary } from "./office/ooxml-visual-map.ts";
 import { applyTrackChangesBytes } from "./office/apply-track-changes.ts";
+import { safeUnzip } from "./office/safe-zip.ts"; // teto contra zip bomb (auditoria 5.16)
 import { rasterizeSvgToPng } from "./office/svg-rasterizer.ts"; // W2: SVG→PNG (resvg-wasm) p/ gráficos/imagens
 import { buildChartSvg } from "./office/chart-svg.ts";
 import { runAuditIntegrity, parseDimensions } from "./office/audit-integrity.ts";
 import { compileArtifact } from "./office/artifact-compiler.ts"; // W3: motor de artefatos compilados (multi-input → HTML rico self-contained) // W2b: auditoria de integridade SÍNCRONA (oráculo de fato/citação) // W2: spec {chart_kind,categories,series} → SVG // W1: track changes nativos (w:del/w:ins + comentários)
+// 💰 CUSTO DE PROVEDOR na plataforma Mukta (Herbert 2026-10-08) — visibilidade interna, tenant vazio; NÃO altera mz_charge_run.
+// Import ESTÁTICO: este arquivo só é deployado via bundle esbuild (deploy-mz-office.sh). Fire-and-forget, nunca lança.
+import { recordMzProviderCost } from "./_shared/record-llm-usage.mjs";
+// 🔒 2026-10-22 (auditoria A3): JWT com ASSINATURA verificada (antes só decodificava o sub) + guarda SSRF em image_urls.
+import { corsHeaders, verifyJwtHs256, checkPublicUrl, guardErrorBody, MZ_GUARD_ERRORS } from "./_shared/tenant-guard.ts";
+
 // SELO DE DATA/HORA no nome do ficheiro gerado — regra do Herbert (2026-08-10). Todo deck saía como
 // `deck.pptx`. Forma YYYY-MM-DD-HHmm, em UTC. Definição idêntica no run-agent-chat e no mz-research.
 const selo = (): string => new Date().toISOString().slice(0, 16).replace("T", "-").replace(":", "");
 
 const strToU8 = (s: string): Uint8Array => new TextEncoder().encode(s);
 const b64 = (u: Uint8Array): string => { let s = ""; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s); };
-const b64ToBytes = (b: string): Uint8Array => { const bin = atob(b); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
+const b64ToBytes = (b: string): Uint8Array => { if (String(b).length > OFFICE_LIMITS.inputB64Chars) throw new Error("arquivo acima do limite"); const bin = atob(b); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
+
+// ── Tetos (auditoria externa 5.16/5.17, 28/10) — as 13 edges dividem um processo; um zip bomb derrubava todas ──
+const OFFICE_LIMITS = {
+  inputBytes: 40 * 1024 * 1024,          // arquivo de entrada (b64 ou storage)
+  inputB64Chars: Math.ceil((40 * 1024 * 1024) / 3) * 4 + 16,
+  imageBytes: 8 * 1024 * 1024,           // imagem baixada pelo juiz visual
+};
+/** Lê o corpo com teto de bytes (Content-Length e contagem real). */
+async function readCapped(r: Response, max: number): Promise<Uint8Array> {
+  const cl = Number(r.headers.get("content-length") || 0);
+  if (cl > max) throw new Error("resposta acima do limite");
+  const reader = r.body?.getReader(); if (!reader) return new Uint8Array(0);
+  const chunks: Uint8Array[] = []; let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read(); if (done) break;
+    got += value.length; if (got > max) { try { await reader.cancel(); } catch { /* */ } throw new Error("resposta acima do limite"); }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(got); let o = 0; for (const c of chunks) { out.set(c, o); o += c.length; } return out;
+}
+/** Nome de arquivo do usuário: só o nome-base, sem separador, sem «..», sem controle; teto de 120 caracteres. */
+function safeFileName(name: string): string {
+  const base = String(name || "").split(/[\\/]/).pop() || "";
+  const clean = base.replace(/[\u0000-\u001f\u007f]/g, "").replace(/\.\.+/g, ".").replace(/^[.\s]+/, "").trim().slice(0, 120);
+  return clean || "arquivo";
+}
+/** source_path do bucket mz-uploads: relativo, sem «..», sem barra inicial. null = recusar. */
+function safeSourcePath(p: unknown): string | null {
+  const v = String(p || "");
+  if (!v || v.length > 512 || v.startsWith("/") || v.includes("..") || v.includes("\\") || /[?#%]/.test(v)) return null;
+  return v;
+}
 function xesc(s: any) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;"); }
 
 // ══ XLSX (buildWorkbook provado B2) ══
@@ -183,7 +222,7 @@ function buildPptxPicXml(rId: string, shapeId: number, name: string, offX: numbe
 }
 // clona o template, aplica edits de texto (só dentro de <a:t>, preserva estrutura) + insere imagens com EMU
 function composePptx(templateBytes: Uint8Array, edits: any[], images: any[]) {
-  const zip: Record<string, Uint8Array> = unzipSync(templateBytes) as any;
+  const zip: Record<string, Uint8Array> = safeUnzip(templateBytes) as any;
   const pres = zip["ppt/presentation.xml"] ? strFromU8(zip["ppt/presentation.xml"]) : "";
   const dm = pres.match(/<p:sldSz[^>]*cx="(\d+)"[^>]*cy="(\d+)"/);
   const SW = dm ? parseInt(dm[1]) : 9144000, SH = dm ? parseInt(dm[2]) : 6858000;
@@ -238,7 +277,9 @@ async function persistFile(bytes: Uint8Array, fileName: string, contentType: str
   const uid = jwtSub(userJwt);
   if (!uid) return null;
   const hash = (await sha256hex(uid)).slice(0, 16);
+  fileName = safeFileName(fileName);
   const path = `${hash}/${Date.now()}_${fileName}`;
+  if (!path.startsWith(hash + "/") || path.includes("..")) return { persist_error: "nome de arquivo inválido" };
   const up = await fetch(`${KONG_STORAGE}/object/mz-uploads/${path}`, { method: "POST", headers: { Authorization: `Bearer ${userJwt}`, "Content-Type": contentType }, body: bytes });
   if (!up.ok) return { persist_error: `upload ${up.status}: ${(await up.text()).slice(0, 120)}` };
   let fileId: string | null = null;
@@ -315,7 +356,7 @@ function ooxmlKind(zip: Record<string, Uint8Array>) {
 }
 // surgical-edit: troca SÓ o conteúdo dentro de <w:t>/<a:t> (nunca as tags/rPr); outras partes byte-idênticas
 function surgicalEditBytes(bytes: Uint8Array, edits: any[]) {
-  const zip: Record<string, Uint8Array> = unzipSync(bytes) as any;
+  const zip: Record<string, Uint8Array> = safeUnzip(bytes) as any;
   const targets = Object.keys(zip).filter((k) => /word\/(document|header\d*|footer\d*)\.xml$/.test(k) || /ppt\/slides\/slide\d+\.xml$/.test(k));
   let subs = 0;
   for (const k of targets) {
@@ -328,7 +369,7 @@ function surgicalEditBytes(bytes: Uint8Array, edits: any[]) {
 // append_docx (COMPLEMENTO, não reescrita): insere <w:p>/<w:tbl> NOVOS antes do <w:sectPr> final do body (ou de
 // </w:body>), preservando TODO o resto do documento byte-idêntico. O doc original permanece; só ganha conteúdo ao fim.
 function appendDocxBytes(bytes: Uint8Array, blocks: any[]) {
-  const zip: Record<string, Uint8Array> = unzipSync(bytes) as any;
+  const zip: Record<string, Uint8Array> = safeUnzip(bytes) as any;
   const dk = "word/document.xml";
   if (!zip[dk]) throw new Error("word/document.xml ausente (não é um .docx válido)");
   let xml = strFromU8(zip[dk]);
@@ -342,7 +383,7 @@ function appendDocxBytes(bytes: Uint8Array, blocks: any[]) {
 }
 // recolor/rebrand: troca srgbClr val="FROM"→"TO" em TODAS as partes XML; binárias (imagens) intocadas
 function recolorBytes(bytes: Uint8Array, recolors: any[]) {
-  const zip: Record<string, Uint8Array> = unzipSync(bytes) as any;
+  const zip: Record<string, Uint8Array> = safeUnzip(bytes) as any;
   let n = 0, parts = 0;
   for (const k of Object.keys(zip)) {
     if (!k.endsWith(".xml")) continue;
@@ -364,13 +405,22 @@ function recolorBytes(bytes: Uint8Array, recolors: any[]) {
 // ══ DISPATCHER ══
 export default async function (req: Request, ctx: any) {
   // CORS whitelist (CLAUDE.md P0: '*' proibido). CLI não manda Origin → liberado (auth por JWT); browser só de domínio confiável.
-  const _allowed = ["https://app.example.com", "https://api.example.com"]; const _o = req.headers.get("origin");
-  const CORS: Record<string, string> = { "Access-Control-Allow-Origin": !_o ? "*" : (_allowed.includes(_o) ? _o : _allowed[0]), "Access-Control-Allow-Headers": "apikey, content-type, authorization", "Access-Control-Allow-Methods": "POST, OPTIONS", "Vary": "Origin" };
+  const CORS = corsHeaders(req);
   const j = (o: unknown, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { ...CORS, "Content-Type": "application/json" } });
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return j({ error: "POST only" }, 405);
   const authz = req.headers.get("authorization") || "";
-  const userJwt = authz.toLowerCase().startsWith("bearer ") ? authz.slice(7) : "";
+  const bearer = authz.toLowerCase().startsWith("bearer ") ? authz.slice(7) : "";
+  // 🔒 SESSÃO OBRIGATÓRIA com assinatura verificada (HMAC contra JWT_SECRET, o mesmo método dos demais edges).
+  // Antes: sem JWT as ações de LLM/SERP (judge_visual, audit_integrity, compile_artifact) rodavam anônimas.
+  const jwtSecret = ctx?.getSecret?.("JWT_SECRET") || ctx?.getSecret?.("GOTRUE_JWT_SECRET");
+  if (!jwtSecret) return j({ error: "server_misconfig" }, 500);
+  let claims: Record<string, any>;
+  try { claims = await verifyJwtHs256(bearer, jwtSecret); }
+  catch { return j(guardErrorBody(MZ_GUARD_ERRORS.SESSION_REQUIRED), MZ_GUARD_ERRORS.SESSION_REQUIRED.status); }
+  // service_role (chamada interna em nome de alguém, on_behalf_of) é aceita, mas NUNCA vai ao storage: lá ela
+  // ignoraria a RLS do bucket (confused deputy — auditoria M3). Storage só com o JWT do PRÓPRIO usuário.
+  const userJwt = claims.role === "service_role" ? "" : bearer;
   try {
     const body = await req.json();
     const action = body.action || body.composer_type;
@@ -441,7 +491,7 @@ export default async function (req: Request, ctx: any) {
       // source: file_b64 (inline) OU source_path (objeto do bucket mz-uploads, dono do JWT)
       let src: Uint8Array | null = null;
       if (body.file_b64) { try { src = b64ToBytes(body.file_b64); } catch { src = null; } }
-      else if (body.source_path && userJwt) { try { const r = await fetch(`${KONG_STORAGE}/object/mz-uploads/${body.source_path}`, { headers: { Authorization: `Bearer ${userJwt}` } }); if (r.ok) src = new Uint8Array(await r.arrayBuffer()); } catch { /* */ } }
+      else if (body.source_path && userJwt) { try { const r = await fetch(`${KONG_STORAGE}/object/mz-uploads/${safeSourcePath(body.source_path) ?? "__invalido__"}`, { headers: { Authorization: `Bearer ${userJwt}` } }); if (r.ok) src = await readCapped(r, OFFICE_LIMITS.inputBytes); } catch { /* */ } }
       if (!src) return j({ error: "source requerido: file_b64 OU source_path (do bucket mz-uploads, dono do JWT)" }, 400);
       let r: any;
       try {
@@ -459,7 +509,7 @@ export default async function (req: Request, ctx: any) {
     if (action === "apply_track_changes") {
       let src: Uint8Array | null = null;
       if (body.file_b64) { try { src = b64ToBytes(body.file_b64); } catch { src = null; } }
-      else if (body.source_path && userJwt) { try { const r = await fetch(`${KONG_STORAGE}/object/mz-uploads/${body.source_path}`, { headers: { Authorization: `Bearer ${userJwt}` } }); if (r.ok) src = new Uint8Array(await r.arrayBuffer()); } catch { /* */ } }
+      else if (body.source_path && userJwt) { try { const r = await fetch(`${KONG_STORAGE}/object/mz-uploads/${safeSourcePath(body.source_path) ?? "__invalido__"}`, { headers: { Authorization: `Bearer ${userJwt}` } }); if (r.ok) src = await readCapped(r, OFFICE_LIMITS.inputBytes); } catch { /* */ } }
       if (!src) return j({ error: "source requerido: file_b64 OU source_path (bucket mz-uploads, dono do JWT)" }, 400);
       if (!Array.isArray(body.changes) || !body.changes.length) return j({ error: "changes [{original_text, replacement_text, comment?, clause_ref?}] required" }, 400);
       let r: any;
@@ -478,10 +528,10 @@ export default async function (req: Request, ctx: any) {
     if (action === "parse_document") {
       let src: Uint8Array | null = null;
       if (body.file_b64) { try { src = b64ToBytes(body.file_b64); } catch { src = null; } }
-      else if (body.source_path && userJwt) { try { const r = await fetch(`${KONG_STORAGE}/object/mz-uploads/${body.source_path}`, { headers: { Authorization: `Bearer ${userJwt}` } }); if (r.ok) src = new Uint8Array(await r.arrayBuffer()); } catch { /* */ } }
+      else if (body.source_path && userJwt) { try { const r = await fetch(`${KONG_STORAGE}/object/mz-uploads/${safeSourcePath(body.source_path) ?? "__invalido__"}`, { headers: { Authorization: `Bearer ${userJwt}` } }); if (r.ok) src = await readCapped(r, OFFICE_LIMITS.inputBytes); } catch { /* */ } }
       if (!src) return j({ error: "source requerido: file_b64 OU source_path (bucket mz-uploads, dono do JWT)" }, 400);
       try {
-        const zip = unzipSync(src); const kind = ooxmlKind(zip);
+        const zip = safeUnzip(src); const kind = ooxmlKind(zip);
         if (kind.ext === ".docx") {
           const blocks = parseDocxToBlocks(src);
           return j({ ok: true, format: "docx", paragraph_count: blocks.length, paragraphs: blocks.map((b: any, i: number) => ({ index: i, id: b.id, text: b.text })) });
@@ -498,7 +548,7 @@ export default async function (req: Request, ctx: any) {
     if (action === "append_docx") {
       let src: Uint8Array | null = null;
       if (body.file_b64) { try { src = b64ToBytes(body.file_b64); } catch { src = null; } }
-      else if (body.source_path && userJwt) { try { const r = await fetch(`${KONG_STORAGE}/object/mz-uploads/${body.source_path}`, { headers: { Authorization: `Bearer ${userJwt}` } }); if (r.ok) src = new Uint8Array(await r.arrayBuffer()); } catch { /* */ } }
+      else if (body.source_path && userJwt) { try { const r = await fetch(`${KONG_STORAGE}/object/mz-uploads/${safeSourcePath(body.source_path) ?? "__invalido__"}`, { headers: { Authorization: `Bearer ${userJwt}` } }); if (r.ok) src = await readCapped(r, OFFICE_LIMITS.inputBytes); } catch { /* */ } }
       if (!src) return j({ error: "source requerido: file_b64 OU source_path (bucket mz-uploads, dono do JWT)" }, 400);
       if (!Array.isArray(body.blocks) || !body.blocks.length) return j({ error: "blocks required" }, 400);
       let r: any;
@@ -514,8 +564,10 @@ export default async function (req: Request, ctx: any) {
       // W2 smoke HPX: rasteriza SVG cru → PNG via resvg-wasm no edge do MZ (o único mecanismo de risco do W2).
       const svg = String(body.svg || "");
       if (!svg.includes("<svg")) return j({ error: "svg (com <svg>) requerido" }, 400);
+      if (svg.length > 2 * 1024 * 1024) return j({ error: "svg acima de 2 MB" }, 413);
+      const clampDim = (v: unknown) => (v ? Math.min(Math.max(Number(v) || 0, 1), 4096) : undefined);
       let png;
-      try { png = await rasterizeSvgToPng(svg, { width: Number(body.width) || 720, height: body.height ? Number(body.height) : undefined, background: body.background || "#ffffff" }); }
+      try { png = await rasterizeSvgToPng(svg, { width: clampDim(body.width) || 720, height: clampDim(body.height), background: String(body.background || "#ffffff").slice(0, 32) }); }
       catch (e) { return j({ error: "resvg: " + String(e) }, 500); }
       const magic = Array.from(png.slice(0, 8));
       if (!(magic[0] === 137 && magic[1] === 80 && magic[2] === 78 && magic[3] === 71)) return j({ error: "png invalido (resvg)", magic, png_len: png.length }, 500);
@@ -545,7 +597,7 @@ export default async function (req: Request, ctx: any) {
       let rsrc: Uint8Array | null = null;
       let rfname = String(body.file_name || "");
       if (body.file_b64) { try { rsrc = b64ToBytes(body.file_b64); } catch { rsrc = null; } }
-      else if (body.source_path && userJwt) { try { const rr0 = await fetch(`${KONG_STORAGE}/object/mz-uploads/${body.source_path}`, { headers: { Authorization: `Bearer ${userJwt}` } }); if (rr0.ok) { rsrc = new Uint8Array(await rr0.arrayBuffer()); if (!rfname) rfname = String(body.source_path).split("/").pop() || ""; } } catch { /* */ } }
+      else if (body.source_path && userJwt) { try { const rr0 = await fetch(`${KONG_STORAGE}/object/mz-uploads/${safeSourcePath(body.source_path) ?? "__invalido__"}`, { headers: { Authorization: `Bearer ${userJwt}` } }); if (rr0.ok) { rsrc = await readCapped(rr0, OFFICE_LIMITS.inputBytes); if (!rfname) rfname = String(body.source_path).split("/").pop() || ""; } } catch { /* */ } }
       if (!rsrc) return j({ error: "source requerido: file_b64 OU source_path (bucket mz-uploads)" }, 400);
       if (!rfname) rfname = `${selo()}-deck.pptx`;
       let rWorkerUrl = "https://example.com";
@@ -558,9 +610,9 @@ export default async function (req: Request, ctx: any) {
         rr = await fetch(`${rWorkerUrl}/render`, { method: "POST", body: fd, signal: AbortSignal.timeout(115000) });
       } catch (e) { return j({ error: "render worker inalcançável: " + String(e) }, 502); }
       if (!rr.ok) { const t = await rr.text().catch(() => ""); return j({ error: "render worker falhou", status: rr.status, detail: t.slice(0, 300) }, 502); }
-      const zipBytes = new Uint8Array(await rr.arrayBuffer());
+      const zipBytes = await readCapped(rr, OFFICE_LIMITS.inputBytes);
       let pmap: Record<string, Uint8Array>;
-      try { pmap = unzipSync(zipBytes) as any; } catch (e) { return j({ error: "resposta do worker não é zip: " + String(e) }, 502); }
+      try { pmap = safeUnzip(zipBytes) as any; } catch (e) { return j({ error: "resposta do worker não é zip: " + String(e) }, 502); }
       const pnames = Object.keys(pmap).filter((k) => /\.png$/i.test(k)).sort();
       if (!pnames.length) return j({ error: "worker não devolveu PNGs" }, 502);
       const rimages: any[] = [];
@@ -576,7 +628,15 @@ export default async function (req: Request, ctx: any) {
       // W5/M3 — ORÁCULO VISUAL de documento/deck: Qwen-VL D1-D8 sobre PNGs (role SSOT document_visual_judge). Puro oráculo, zero topologia.
       let jimgs: string[] = Array.isArray(body.images_b64) ? body.images_b64.slice(0, 24) : [];
       if (!jimgs.length && Array.isArray(body.image_urls)) {
-        for (const u of body.image_urls.slice(0, 24)) { try { const ir = await fetch(u, { signal: AbortSignal.timeout(20000) }); if (ir.ok) jimgs.push(b64(new Uint8Array(await ir.arrayBuffer()))); } catch { /* */ } }
+        // 🔒 SSRF: só https para host PÚBLICO (literal + DNS), sem seguir redirect (um 3xx poderia apontar p/ a rede interna).
+        for (const u of body.image_urls.slice(0, 24)) {
+          try {
+            const su = String(u || "");
+            if (!/^https:\/\//i.test(su) || !(await checkPublicUrl(su)).ok) continue;
+            const ir = await fetch(su, { signal: AbortSignal.timeout(20000), redirect: "manual" });
+            if (ir.ok) jimgs.push(b64(await readCapped(ir, OFFICE_LIMITS.imageBytes)));
+          } catch { /* */ }
+        }
       }
       if (!jimgs.length) return j({ error: "images_b64[] OU image_urls[] requerido" }, 400);
       let jm: any = null;
@@ -590,8 +650,10 @@ export default async function (req: Request, ctx: any) {
       const judgeOne = async (imgb64: string) => {
         for (let a = 1; a <= 2; a++) {
           try {
+            const mzT0 = Date.now();
             const rr = await fetch(`${String(jm.base_url).replace(/\/+$/, "")}/chat/completions`, { method: "POST", signal: AbortSignal.timeout(60000), headers: { authorization: `Bearer ${jkey}`, "content-type": "application/json" }, body: JSON.stringify({ model: jm.model_slug, max_tokens: 500, temperature: 0, messages: [{ role: "system", content: JSYS }, { role: "user", content: [{ type: "text", text: "Avalie esta página." }, { type: "image_url", image_url: { url: `data:image/png;base64,${imgb64}` } }] }], ...(jm.provider_config ? { provider: jm.provider_config } : {}) }) });
             const jj: any = await rr.json();
+            recordMzProviderCost({ module: "mz-office.judge-visual", provider: jm.provider, baseUrl: jm.base_url, modelId: jm.model_slug, response: jj, ok: rr.ok, latencyMs: Date.now() - mzT0 });
             if (jj.choices) { const parsed = xjson(jj.choices[0].message.content); if (parsed && parsed.verdict) return parsed; if (a === 2) return { error: "parse", verdict: "error" }; }
             else if (a === 2) return { error: "http " + rr.status, verdict: "error" };
           } catch (e) { if (a === 2) return { error: String(e).slice(0, 80), verdict: "error" }; }
@@ -616,10 +678,10 @@ export default async function (req: Request, ctx: any) {
       } else {
         let asrc: Uint8Array | null = null;
         if (body.file_b64) { try { asrc = b64ToBytes(body.file_b64); } catch { asrc = null; } }
-        else if (body.source_path && userJwt) { try { const rr = await fetch(`${KONG_STORAGE}/object/mz-uploads/${body.source_path}`, { headers: { Authorization: `Bearer ${userJwt}` } }); if (rr.ok) { asrc = new Uint8Array(await rr.arrayBuffer()); if (!body.source_name) srcName = String(body.source_path).split("/").pop() || srcName; } } catch { /* */ } }
+        else if (body.source_path && userJwt) { try { const rr = await fetch(`${KONG_STORAGE}/object/mz-uploads/${safeSourcePath(body.source_path) ?? "__invalido__"}`, { headers: { Authorization: `Bearer ${userJwt}` } }); if (rr.ok) { asrc = await readCapped(rr, OFFICE_LIMITS.inputBytes); if (!body.source_name) srcName = String(body.source_path).split("/").pop() || srcName; } } catch { /* */ } }
         if (!asrc) return j({ error: "source requerido: text OU file_b64 OU source_path (bucket mz-uploads, dono do JWT)" }, 400);
         try {
-          const azip = unzipSync(asrc); const akind = ooxmlKind(azip);
+          const azip = safeUnzip(asrc); const akind = ooxmlKind(azip);
           if (akind.ext === ".docx") auditText = parseDocxToBlocks(asrc).map((b: any) => b.text).filter(Boolean).join("\n\n");
           else return j({ error: "audit_integrity: por ora só docx (via parse) ou 'text' direto", format: akind.ext }, 400);
         } catch (e) { return j({ error: "audit_integrity parse: " + String(e) }, 400); }
@@ -658,10 +720,10 @@ export default async function (req: Request, ctx: any) {
         try {
           const rr = await fetch(`${KONG_STORAGE}/object/mz-uploads/${p}`, { headers: { Authorization: `Bearer ${userJwt}` } });
           if (!rr.ok) return null;
-          const bytes = new Uint8Array(await rr.arrayBuffer());
+          const bytes = await readCapped(rr, OFFICE_LIMITS.inputBytes);
           const name = String(p).split("/").pop() || "arquivo";
           try {
-            const zip = unzipSync(bytes); const kind = ooxmlKind(zip);
+            const zip = safeUnzip(bytes); const kind = ooxmlKind(zip);
             if (kind.ext === ".docx") return { name, text: parseDocxToBlocks(bytes).map((b: any) => b.text).filter(Boolean).join("\n\n") };
             if (kind.ext === ".pptx") return { name, text: buildVisualMapSummary(buildPptxVisualMap(zip)) };
           } catch { /* nao e zip OOXML → tenta como texto puro (txt/csv/md/json/html) */ }

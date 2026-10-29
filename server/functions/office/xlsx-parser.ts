@@ -26,6 +26,7 @@
  */
 
 import { unzipSync, strFromU8 } from "https://esm.sh/fflate@0.8.2";
+import { safeUnzip } from "./safe-zip.ts"; // teto contra zip bomb (auditoria 5.16)
 import { XMLParser } from "https://esm.sh/fast-xml-parser@4.5.1";
 import { computeContextHash } from "./ooxml-engine.ts";
 
@@ -301,7 +302,7 @@ function syncContextHash(before: string, target: string, after: string): string 
  * Versão assíncrona com SHA-256 real via crypto.subtle.
  */
 export async function parseXlsxToBlocksAsync(buffer: Uint8Array): Promise<XlsxBlock[]> {
-  const unzipped = unzipSync(buffer);
+  const unzipped = safeUnzip(buffer);
 
   // 1. Workbook + rels
   const workbookBytes = unzipped["xl/workbook.xml"];
@@ -369,7 +370,7 @@ export async function parseXlsxToBlocksAsync(buffer: Uint8Array): Promise<XlsxBl
  * Usado para popular latest_lexical_map em project_documents.
  */
 export function buildXlsxLexicalMap(buffer: Uint8Array): Array<{ id: string; title: string; level: number }> {
-  const unzipped = unzipSync(buffer);
+  const unzipped = safeUnzip(buffer);
 
   const workbookBytes = unzipped["xl/workbook.xml"];
   const relsBytes = unzipped["xl/_rels/workbook.xml.rels"];

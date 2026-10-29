@@ -17,11 +17,12 @@
 // use is capped at five users per organisation; beyond that, a commercial
 // licence is required: licensing@mukta.app
 // Full terms: AI-USAGE-NOTICE.md and LICENSE.md
-import { useState, useEffect } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
 import {
   Users, UserCheck, Activity, RefreshCw, Loader2, CheckCircle2, XCircle,
-  Clock, Cpu, Zap, AlertTriangle, ShieldAlert, Square, Mail, Building2, Gift,
+  Clock, Cpu, Zap, AlertTriangle, ShieldAlert, Square, Mail, Building2, Gift, Radio,
 } from "lucide-react";
+const AdminLive = lazy(() => import("./AdminLive.jsx"));
 import { useT } from "./lib/i18n.jsx";
 import config from "./config.js";
 
@@ -34,6 +35,7 @@ const STRINGS = {
     status_denied: "negado",
     adminTitle: "Admin",
     refresh: "Atualizar",
+    tab_live: "Ao vivo",
     tab_cadastros: "Cadastros",
     tab_usuarios: "Usuários",
     tab_tower: "Control Tower",
@@ -94,6 +96,7 @@ const STRINGS = {
     status_denied: "denied",
     adminTitle: "Admin",
     refresh: "Refresh",
+    tab_live: "Live",
     tab_cadastros: "Signups",
     tab_usuarios: "Users",
     tab_tower: "Control Tower",
@@ -154,6 +157,7 @@ const STRINGS = {
     status_denied: "denegado",
     adminTitle: "Admin",
     refresh: "Actualizar",
+    tab_live: "En vivo",
     tab_cadastros: "Registros",
     tab_usuarios: "Usuarios",
     tab_tower: "Control Tower",
@@ -247,7 +251,7 @@ function fmtDate(s) {
 
 export default function Admin({ supabase }) {
   const t = useT(STRINGS);
-  const [tab, setTab] = useState("cadastros");
+  const [tab, setTab] = useState("live");
   const [signups, setSignups] = useState([]);
   const [users, setUsers] = useState([]);
   const [health, setHealth] = useState(null);
@@ -324,13 +328,14 @@ export default function Admin({ supabase }) {
 
   const pendingCount = signups.filter((s) => PENDING.has(s.status)).length;
   const TABS = [
+    { id: "live", label: t.tab_live, icon: Radio },
     { id: "cadastros", label: t.tab_cadastros, icon: UserCheck, badge: pendingCount },
     { id: "usuarios", label: t.tab_usuarios, icon: Users },
     { id: "tower", label: t.tab_tower, icon: Activity },
   ];
 
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-4 p-4 text-foreground">
+    <div className={`mx-auto flex ${tab === "live" ? "max-w-7xl" : "max-w-5xl"} flex-col gap-4 p-4 text-foreground`}>
       <div className="flex items-center justify-between">
         <h1 className="flex items-center gap-2 text-2xl font-bold">
           <ShieldAlert className="h-6 w-6 text-teal-600" /> {t.adminTitle}
@@ -341,17 +346,21 @@ export default function Admin({ supabase }) {
       </div>
 
       {/* sub-nav */}
-      <div className="flex gap-1 rounded-xl bg-muted p-1">
+      <div className="flex gap-1 overflow-x-auto rounded-xl bg-muted p-1">
         {TABS.map((t) => (
-          <button key={t.id} onClick={() => setTab(t.id)}
-            className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium transition ${tab === t.id ? "bg-card text-teal-700 shadow-sm dark:text-teal-300" : "text-muted-foreground hover:text-foreground"}`}>
+          <button key={t.id} onClick={() => setTab(t.id)} data-testid={`admin-tab-${t.id}`}
+            className={`flex flex-1 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-3 py-1.5 text-sm font-medium transition ${tab === t.id ? "bg-card text-teal-700 shadow-sm dark:text-teal-300" : "text-muted-foreground hover:text-foreground"}`}>
             <t.icon className="h-4 w-4" /> {t.label}
             {t.badge > 0 && <span className="ml-1 rounded-full bg-amber-500 px-1.5 text-xs font-bold text-white">{t.badge}</span>}
           </button>
         ))}
       </div>
 
-      {loading ? (
+      {tab === "live" ? (
+        <Suspense fallback={<div className="flex justify-center py-10"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>}>
+          <AdminLive supabase={supabase} />
+        </Suspense>
+      ) : loading ? (
         <div className="flex justify-center py-10"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
       ) : tab === "cadastros" ? (
         <div className="flex flex-col gap-2">

@@ -50,9 +50,10 @@
  *   { success, file_id, file_name, signed_url, changes_applied, changes_total,
  *     comments_count, deletions, insertions, docx_size_bytes }
  */
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { getCorsHeaders } from "./cors.ts";
+// (createClient e getCorsHeaders saíram: não eram usados, e `./cors.ts` não existe — o bundle esbuild descartava o
+//  import morto, mas o Deno cru, como o pacote público roda, falhava ao carregar o mz-office. Auditoria externa 7.4.)
 import { unzipSync } from "https://esm.sh/fflate@0.8.2";
+import { safeUnzip } from "./safe-zip.ts"; // teto contra zip bomb (auditoria 5.16)
 import {
   makeParser,
   makeBuilder,
@@ -336,7 +337,7 @@ export function applyTrackChangesBytes(originalBytes: Uint8Array, rawChanges: an
     .filter((c: any) => c && typeof c.original_text === "string" && typeof c.replacement_text === "string" && c.original_text.trim() && c.replacement_text.trim())
     .map((c: any) => ({ original_text: String(c.original_text), replacement_text: String(c.replacement_text), comment: typeof c.comment === "string" ? c.comment : undefined, clause_ref: typeof c.clause_ref === "string" ? c.clause_ref : undefined }));
   if (changes.length === 0) return { ok: false, error: "BAD_REQUEST", message: "changes[] vazio ou inválido (precisa original_text + replacement_text)" };
-  const unzipped = unzipSync(originalBytes);
+  const unzipped = safeUnzip(originalBytes);
   const docXmlBytes = unzipped["word/document.xml"];
   if (!docXmlBytes) {
     return { ok: false, error: "EDGE_BAD_DOCX", message: "word/document.xml ausente", status: 400 };

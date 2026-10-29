@@ -108,7 +108,7 @@ function Harness() {
     projects: [{ id: "p1", name: "Mukta Zero — front" }, { id: "p2", name: "AGI-2" }],
     selectedProjectId: scope, onSelectProject: setScope,
     onMoveConversation: (id, pid) => console.log("mover", id, "->", pid),
-    email: "herbert.o.moller@gmail.com", walletTotal: 184320,
+    email: "ana@example.com", walletTotal: 184320,
     onWallet: () => {}, onAccount: () => {}, onLogout: () => {},
     onRenameConversation: (id, title) => console.log("rename", id, title),
     onTogglePin: (id) => console.log("pin", id),

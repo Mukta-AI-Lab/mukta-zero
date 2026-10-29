@@ -21,6 +21,8 @@
 // Gera um artefato de site (HTML standalone) a partir de um pedido, via o cérebro SSOT,
 // e persiste em mz_artifacts (escopo do usuário). Contrato mukta-edge: (req, {sql, getSecret}).
 // FlexCode completo (validação por execução) depende do code-exec (deferido) — aqui é LLM→HTML→artefato.
+// 🔒 Isolamento entre tenants (2026-10-22): import ESTÁTICO → deploy SÓ por bundle (deploy-edge-bundle.sh generate-site).
+import { corsHeaders, resolveTenant, guardErrorBody, ownsProject, ownsConversation, verifyJwtHs256 } from "./_shared/tenant-guard.ts";
 
 function b64urlToBytes(s: string): Uint8Array {
   const b = s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "=");
@@ -30,18 +32,8 @@ function b64urlToBytes(s: string): Uint8Array {
   return out;
 }
 function b64urlToJson(s: string): any { return JSON.parse(new TextDecoder().decode(b64urlToBytes(s))); }
-async function verifyJwt(token: string, secret: string): Promise<any> {
-  const parts = token.split(".");
-  if (parts.length !== 3) throw new Error("jwt malformado");
-  const [h, p, sig] = parts;
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
-  const ok = await crypto.subtle.verify("HMAC", key, b64urlToBytes(sig), new TextEncoder().encode(`${h}.${p}`));
-  if (!ok) throw new Error("assinatura inválida");
-  const claims = b64urlToJson(p);
-  if (claims.exp && Date.now() / 1000 > claims.exp) throw new Error("token expirado");
-  if (!claims.sub) throw new Error("sem sub");
-  return claims;
-}
+// Verificador ÚNICO (exp obrigatório, iss/aud/alg conferidos) — auditoria externa 5.22, 28/10.
+const verifyJwt = async (t: string, s: string) => { const c = await verifyJwtHs256(t, s); if (!c.sub) throw new Error("sem sub"); return c; };
 
 // Remove cercas markdown (```html ... ```) e texto fora do HTML.
 function extractHtml(raw: string): string {
@@ -53,15 +45,20 @@ function extractHtml(raw: string): string {
   return s.trim();
 }
 
+// 💰 CUSTO DE PROVEDOR na plataforma Mukta (Herbert 2026-10-08: "a chave é da Mukta"). Só VISIBILIDADE do custo
+// interno (tenant vazio → empresa de plataforma); NÃO altera a cobrança do usuário MZ (mz_charge_run segue igual).
+// Import DINÂMICO de propósito: com bundle (esbuild) o módulo é embutido; num deploy cru single-file o import falha,
+// é capturado e só o registro fica desligado — a função nunca quebra por causa disso. Fire-and-forget.
+let _mzCostWarn = 0;
+function mzProviderCost(a: Record<string, unknown>): void {
+  import("./_shared/record-llm-usage.mjs")
+    .then((m: any) => m.recordMzProviderCost(a))
+    .catch((e) => { if (_mzCostWarn++ < 3) console.error("[mz-provider-cost] módulo de registro indisponível (deploy sem bundle?):", String((e as Error)?.message || e).slice(0, 160)); });
+}
+
 export default async function (req: Request, ctx: { sql: any; getSecret: (n: string) => string | undefined }) {
   const { sql, getSecret } = ctx;
-  const origin = req.headers.get("origin") || "*";
-  const cors: Record<string, string> = {
-    "access-control-allow-origin": origin,
-    "access-control-allow-headers": "apikey, content-type, authorization",
-    "access-control-allow-methods": "POST, OPTIONS",
-    "vary": "Origin",
-  };
+  const cors = corsHeaders(req); // allowlist do mz-workspace (antes refletia qualquer Origin)
   const j = (obj: unknown, status = 200) => new Response(JSON.stringify(obj), { status, headers: { ...cors, "content-type": "application/json" } });
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
   if (req.method !== "POST") return j({ error: "method_not_allowed" }, 405);
@@ -78,16 +75,18 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
   const spec = (body.spec || body.prompt || "").toString().trim();
   if (!spec) return j({ error: "empty_spec" }, 400);
   const title = (body.title || spec.slice(0, 60)).toString();
+  // 🔒 project_id/conversation_id do corpo: o artefato só se vincula a projeto/conversa DO usuário (auditoria B4/M3).
+  // Projeto alheio/inexistente → 404 (não confirma id alheio), mesmo padrão do mz-async.
   const projectId = body.project_id || null;
+  if (projectId && !(await ownsProject(sql, userId, projectId))) return j({ error: "project_nao_encontrado", detail: "projeto não existe ou não pertence a você" }, 404);
   const conversationId = body.conversation_id || null;
+  if (conversationId && !(await ownsConversation(sql, userId, conversationId))) return j({ error: "conversa_nao_encontrada", detail: "conversa não existe ou não pertence a você" }, 404);
 
   // resolve tenant + modelo primário (SSOT) — ladder por priority.
-  let companyId: string | null = body.company_id || null;
-  let agentId: string | null = body.agent_id || null;
-  try {
-    if (!companyId) { const r = await sql`select company_id from user_company_memberships where user_id = ${userId} limit 1`; companyId = r[0]?.company_id || null; }
-    if (!agentId && companyId) { const r = await sql`select id from agent_profiles where company_id = ${companyId} and is_active = true limit 1`; agentId = r[0]?.id || null; }
-  } catch { /* */ }
+  // 🔒 company_id/agent_id do corpo só valem com vínculo conferido; id alheio → 403 (auditoria B4).
+  const tenant = await resolveTenant(sql, userId, body.company_id, body.agent_id);
+  if (!tenant.ok) return j(guardErrorBody(tenant.err), tenant.err.status);
+  const agentId: string | null = tenant.agentId;
 
   let agentModelId: string | null = null;
   if (agentId) { try { const r = await sql`select model_id from agent_profiles where id = ${agentId} limit 1`; agentModelId = r[0]?.model_id || null; } catch { /* */ } }
@@ -113,12 +112,14 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
     key = key || getSecret(keyName);
     if (!key) { attempts.push({ model: m.model_slug, error: "no_key" }); continue; }
     try {
+      const mzT0 = Date.now();
       const resp = await fetch(`${String(m.base_url).replace(/\/+$/, "")}/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
         body: JSON.stringify({ model: m.model_slug, messages, temperature: 0.3, max_tokens: 8192 }),
       });
       const raw = await resp.text();
+      mzProviderCost({ module: "generate-site", provider: m.provider, baseUrl: m.base_url, modelId: m.model_slug, responseText: raw, ok: resp.ok, latencyMs: Date.now() - mzT0 });
       if (!resp.ok) { attempts.push({ model: m.model_slug, status: resp.status }); continue; }
       let content = "";
       try { content = JSON.parse(raw)?.choices?.[0]?.message?.content ?? ""; } catch { content = ""; }

@@ -159,17 +159,17 @@ check("comando inexistente sugere o parecido", /não existe/.test(lastScreen()))
 
 // LOGIN — o buraco que passou sem UAT na primeira entrega: `/entrar` só mandava
 // o usuário para outro terminal, ou seja, não dava para entrar pela janela.
-type("/entrar herbert\r");
+type("/entrar ana\r");
 await tick();
 const pedeSenha = lastScreen();
-check("/entrar <usuário> pede a senha NA JANELA", /senha de herbert/.test(pedeSenha), pedeSenha.split("\n").slice(-6).join(" | ").slice(0, 200));
+check("/entrar <usuário> pede a senha NA JANELA", /senha de ana/.test(pedeSenha), pedeSenha.split("\n").slice(-6).join(" | ").slice(0, 200));
 type("segredo123");
 await tick();
 const mascarado = lastScreen();
 check("a senha é MASCARADA na tela", /•{10}/.test(mascarado) && !/segredo123/.test(mascarado));
 type("\x1b"); // Esc cancela sem enviar
 await tick();
-check("Esc cancela o prompt de senha", !/senha de herbert/.test(lastScreen()));
+check("Esc cancela o prompt de senha", !/senha de ana/.test(lastScreen()));
 check("a senha não vaza para o transcript", !/segredo123/.test(lastScreen()));
 
 type("/sair\r");

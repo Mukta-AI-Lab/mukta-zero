@@ -43,25 +43,45 @@ const esc = (s: string) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;",
 
 function page(body: string): Response {
   const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Autorizar Mukta Zero CLI</title><style>body{font-family:system-ui,-apple-system,sans-serif;background:#0b1020;color:#e8ecf5;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}.card{background:#141b34;border:1px solid #263156;border-radius:16px;padding:32px;max-width:400px;width:90%}h1{font-size:20px;margin:0 0 4px}p{color:#9fb0d0;font-size:14px;line-height:1.5}input{width:100%;box-sizing:border-box;padding:10px 12px;margin:6px 0;background:#0b1020;border:1px solid #263156;border-radius:8px;color:#e8ecf5;font-size:14px}button{width:100%;padding:11px;margin-top:12px;background:#4f7cff;color:#fff;border:0;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer}button:hover{background:#3d6bf0}.code{font-family:ui-monospace,monospace;font-size:22px;letter-spacing:2px;color:#7dd3fc;text-align:center;margin:8px 0}.ok{color:#4ade80}.err{color:#f87171;font-size:13px}</style></head><body><div class="card">${body}</div></body></html>`;
-  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'; form-action https://api.example.com", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" } });
+}
+
+// ── Endurecimento (auditoria externa 5.12/5.21, 28/10) ──────────────────────────────────────────────
+// - O access_token NÃO é mais gravado: o approve só marca o pedido; o token é cunhado no poll, dentro de um
+//   UPDATE atômico approved→consumed (dois polls simultâneos não recebem dois tokens).
+// - `start` anônimo com teto global e por IP (hash do IP, nunca o IP) e limpeza dos pedidos vencidos.
+// - Token com iss/aud/exp, conferidos pelo verificador único (_shared/tenant-guard.ts).
+const START_MAX_PENDING_GLOBAL = 60;   // pedidos pendentes vivos (10 min) na instância inteira
+const START_MAX_PENDING_PER_IP = 5;    // pendentes vivos por IP
+const APPROVED_REDEEM_WINDOW_MIN = 10; // aprovado e não resgatado em 10 min → expira
+const TOKEN_TTL_S = 24 * 3600;
+
+function clientIp(req: Request): string {
+  const xff = req.headers.get("x-forwarded-for") || "";
+  return (req.headers.get("cf-connecting-ip") || xff.split(",")[0] || req.headers.get("x-real-ip") || "").trim();
+}
+async function ipHash(ip: string, salt: string): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", enc.encode(`${salt}:${ip}`));
+  return b64url(d).slice(0, 22);
 }
 
 export default async function (req: Request, ctx: { sql: any; getSecret: (n: string) => string | undefined }) {
   const { sql, getSecret } = ctx;
   const _allowed = ["https://app.example.com", "https://api.example.com"]; const _o = req.headers.get("origin");
-  const CORS: Record<string, string> = { "Access-Control-Allow-Origin": !_o ? "*" : (_allowed.includes(_o) ? _o : _allowed[0]), "Access-Control-Allow-Headers": "apikey, content-type, authorization", "Access-Control-Allow-Methods": "POST, GET, OPTIONS", "Vary": "Origin" };
-  const j = (o: unknown, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { ...CORS, "Content-Type": "application/json" } });
+  const CORS: Record<string, string> = { "Access-Control-Allow-Origin": _o && _allowed.includes(_o) ? _o : _allowed[0], "Access-Control-Allow-Headers": "apikey, content-type, authorization", "Access-Control-Allow-Methods": "POST, GET, OPTIONS", "Vary": "Origin" };
+  const j = (o: unknown, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { ...CORS, "Content-Type": "application/json", "Cache-Control": "no-store" } });
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
   const url = new URL(req.url);
   const anon = getSecret("ANON_KEY");
   const jwtSecret = getSecret("JWT_SECRET") || getSecret("GOTRUE_JWT_SECRET");
+  const issuer = getSecret("JWT_ISSUER") || "supabase";
   const authBase = "http://kong:8000"; // gotrue via kong, rede interna
   const verifyUrlBase = "https://api.example.com/functions/v1/cli-auth";
 
   // ── GET ?code=<user_code> → página de aprovação (browser) ──
   if (req.method === "GET") {
-    const code = (url.searchParams.get("code") || "").toUpperCase().trim();
+    const code = (url.searchParams.get("code") || "").toUpperCase().trim().slice(0, 16);
     if (!code) return page(`<h1>Autorizar CLI</h1><p>Abra este link a partir do comando <b>mz auth</b> no seu terminal.</p>`);
     let r: any[] = [];
     try { r = await sql`select user_code, status, expires_at, client_name from public.cli_auth_requests where user_code = ${code} limit 1`; } catch { /* */ }
@@ -69,7 +89,7 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
     const reqRow = r[0];
     if (new Date(reqRow.expires_at).getTime() < Date.now()) return page(`<h1>Código expirado</h1><p class="err">A solicitação expirou. Rode <b>mz auth</b> de novo.</p>`);
     if (reqRow.status !== "pending") return page(`<h1 class="ok">Já autorizado</h1><p>Pode voltar ao terminal.</p>`);
-    return page(`<h1>Autorizar Mukta Zero CLI</h1><p>O CLI <b>${esc(reqRow.client_name || "mz")}</b> quer acesso à sua conta por 24h. Confirme o código e faça login.</p><div class="code">${esc(code)}</div><form method="POST" action="${verifyUrlBase}"><input type="hidden" name="action" value="approve"/><input type="hidden" name="user_code" value="${esc(code)}"/><input name="email" type="email" placeholder="email" autocomplete="username" required/><input name="password" type="password" placeholder="senha" autocomplete="current-password" required/><button type="submit">Autorizar por 24h</button></form>`);
+    return page(`<h1>Autorizar Mukta Zero CLI</h1><p>O CLI <b>${esc(reqRow.client_name || "mz")}</b> quer acesso à sua conta por 24h. Confirme que o código abaixo é o mesmo mostrado no seu terminal e faça login.</p><div class="code">${esc(code)}</div><form method="POST" action="${verifyUrlBase}"><input type="hidden" name="action" value="approve"/><input type="hidden" name="user_code" value="${esc(code)}"/><input name="email" type="email" placeholder="email" autocomplete="username" required/><input name="password" type="password" placeholder="senha" autocomplete="current-password" required/><button type="submit">Autorizar por 24h</button></form>`);
   }
 
   if (req.method !== "POST") return j({ error: "method_not_allowed" }, 405);
@@ -78,29 +98,44 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
   let body: any = {};
   const ctype = req.headers.get("content-type") || "";
   if (ctype.includes("application/json")) { try { body = await req.json(); } catch { /* */ } }
-  else { const fd = await req.formData(); for (const [k, v] of fd.entries()) body[k] = v; }
+  else { try { const fd = await req.formData(); for (const [k, v] of fd.entries()) body[k] = v; } catch { /* */ } }
   const action = String(body.action || "");
 
-  // ── START (CLI) ──
+  // ── START (CLI) — anônimo, com teto ──
   if (action === "start") {
+    const ipH = await ipHash(clientIp(req), jwtSecret || "mz");
+    try {
+      await sql`delete from public.cli_auth_requests where expires_at < now() - interval '1 day'`;
+      const c = await sql`select count(*)::int as total, count(*) filter (where client_ip_hash = ${ipH})::int as ip
+        from public.cli_auth_requests where status = 'pending' and expires_at > now()`;
+      if ((c[0]?.ip ?? 0) >= START_MAX_PENDING_PER_IP || (c[0]?.total ?? 0) >= START_MAX_PENDING_GLOBAL) {
+        return j({ error: "rate_limited", detail: "muitas solicitações pendentes; aguarde alguns minutos" }, 429);
+      }
+    } catch (e) {
+      console.error("[cli-auth] start: falha ao conferir teto:", String((e as Error)?.message || e).slice(0, 160));
+      return j({ error: "start_failed" }, 503);
+    }
     const device_code = randCode(32);
     const user_code = userCode();
     const expires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     try {
-      await sql`insert into public.cli_auth_requests (device_code, user_code, status, client_name, expires_at)
-        values (${device_code}, ${user_code}, 'pending', ${String(body.client_name || "mz-cli").slice(0, 40)}, ${expires})`;
-    } catch (e) { return j({ error: "start_failed", detail: String((e as Error).message || e).slice(0, 120) }, 500); }
+      await sql`insert into public.cli_auth_requests (device_code, user_code, status, client_name, expires_at, client_ip_hash)
+        values (${device_code}, ${user_code}, 'pending', ${String(body.client_name || "mz-cli").replace(/[^\w .-]/g, "").slice(0, 40)}, ${expires}, ${ipH})`;
+    } catch (e) {
+      console.error("[cli-auth] start: insert falhou:", String((e as Error)?.message || e).slice(0, 160));
+      return j({ error: "start_failed" }, 500);
+    }
     return j({ device_code, user_code, verification_url: `${verifyUrlBase}?code=${user_code}`, interval: 3, expires_in: 600 });
   }
 
-  // ── APPROVE (página de aprovação) — valida email/senha no gotrue, emite JWT 24h ──
+  // ── APPROVE (página de aprovação) — valida email/senha no gotrue e MARCA o pedido (sem gravar token) ──
   if (action === "approve") {
-    const user_code = String(body.user_code || "").toUpperCase().trim();
+    const user_code = String(body.user_code || "").toUpperCase().trim().slice(0, 16);
     const email = String(body.email || "").trim();
     const password = String(body.password || "");
     if (!user_code || !email || !password) return page(`<h1>Faltam dados</h1><p class="err">Preencha email e senha.</p>`);
     let r: any[] = [];
-    try { r = await sql`select device_code, status, expires_at from public.cli_auth_requests where user_code = ${user_code} limit 1`; } catch { /* */ }
+    try { r = await sql`select status, expires_at from public.cli_auth_requests where user_code = ${user_code} limit 1`; } catch { /* */ }
     if (!r.length || new Date(r[0].expires_at).getTime() < Date.now()) return page(`<h1>Código inválido/expirado</h1><p class="err">Rode <b>mz auth</b> de novo.</p>`);
     if (r[0].status !== "pending") return page(`<h1 class="ok">Já autorizado</h1><p>Volte ao terminal.</p>`);
     // autentica no gotrue (anon key + password grant) — NUNCA service_role
@@ -111,32 +146,42 @@ export default async function (req: Request, ctx: { sql: any; getSecret: (n: str
     } catch { /* */ }
     const userId = gj?.user?.id;
     if (!userId) return page(`<h1>Login falhou</h1><p class="err">Email ou senha incorretos.</p><p><a href="${verifyUrlBase}?code=${esc(user_code)}" style="color:#7dd3fc">Tentar de novo</a></p>`);
-    if (!jwtSecret) return page(`<h1>Erro de servidor</h1><p class="err">JWT_SECRET ausente.</p>`);
-    const now = Math.floor(Date.now() / 1000);
-    const token = await signJwt({ sub: userId, email, role: "authenticated", aud: "authenticated", iat: now, exp: now + 24 * 3600, amr: [{ method: "cli-device" }] }, jwtSecret);
+    let done: any[] = [];
     try {
-      await sql`update public.cli_auth_requests set status='approved', user_id=${userId}::uuid, access_token=${token}, approved_at=now() where user_code=${user_code} and status='pending'`;
+      done = await sql`update public.cli_auth_requests set status='approved', user_id=${userId}::uuid, approved_at=now()
+        where user_code=${user_code} and status='pending' and expires_at > now() returning 1`;
     } catch { return page(`<h1>Erro</h1><p class="err">Não foi possível concluir.</p>`); }
+    if (!done.length) return page(`<h1>Código inválido/expirado</h1><p class="err">Rode <b>mz auth</b> de novo.</p>`);
     return page(`<h1 class="ok">✓ Autorizado!</h1><p>O <b>Mukta Zero CLI</b> agora tem acesso por 24h. Pode fechar esta aba e voltar ao terminal.</p>`);
   }
 
-  // ── POLL (CLI) — retorna o token quando aprovado (1-uso) ──
+  // ── POLL (CLI) — entrega o token UMA vez, com resgate atômico ──
   if (action === "poll") {
-    const device_code = String(body.device_code || "");
+    const device_code = String(body.device_code || "").slice(0, 128);
     if (!device_code) return j({ error: "device_code requerido" }, 400);
     let r: any[] = [];
-    try { r = await sql`update public.cli_auth_requests set poll_count = poll_count + 1 where device_code = ${device_code} returning status, access_token, user_id, expires_at, poll_count`; } catch { /* */ }
+    try { r = await sql`update public.cli_auth_requests set poll_count = poll_count + 1 where device_code = ${device_code} returning status, expires_at, poll_count`; } catch { /* */ }
     if (!r.length) return j({ status: "not_found" }, 404);
     const row = r[0];
     if (row.poll_count > 400) return j({ status: "rate_limited" }, 429);
-    if (new Date(row.expires_at).getTime() < Date.now() && row.status === "pending") return j({ status: "expired" }, 410);
-    if (row.status === "approved" && row.access_token) {
-      // entrega 1× e marca consumido
-      try { await sql`update public.cli_auth_requests set status='consumed' where device_code=${device_code}`; } catch { /* */ }
-      return j({ status: "approved", access_token: row.access_token, user_id: row.user_id, expires_in: 24 * 3600 });
+    if (row.status === "pending") return new Date(row.expires_at).getTime() < Date.now() ? j({ status: "expired" }, 410) : j({ status: "pending" });
+    if (row.status !== "approved") return j({ status: row.status === "consumed" ? "consumed" : "denied" });
+    if (!jwtSecret) return j({ error: "server_misconfig" }, 500);
+    // resgate atômico: só UM poll vira o pedido de approved para consumed
+    let won: any[] = [];
+    try {
+      won = await sql`update public.cli_auth_requests r set status='consumed', access_token=null
+        where r.device_code = ${device_code} and r.status = 'approved'
+          and r.approved_at > now() - make_interval(mins => ${APPROVED_REDEEM_WINDOW_MIN})
+        returning r.user_id, (select u.email from auth.users u where u.id = r.user_id) as email`;
+    } catch (e) {
+      console.error("[cli-auth] poll: resgate falhou:", String((e as Error)?.message || e).slice(0, 160));
+      return j({ error: "poll_failed" }, 503);
     }
-    if (row.status === "consumed") return j({ status: "consumed" });
-    return j({ status: "pending" });
+    if (!won.length) return j({ status: "consumed" });
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signJwt({ iss: issuer, sub: won[0].user_id, email: won[0].email || undefined, role: "authenticated", aud: "authenticated", iat: now, exp: now + TOKEN_TTL_S, amr: [{ method: "cli-device" }] }, jwtSecret);
+    return j({ status: "approved", access_token: token, user_id: won[0].user_id, expires_in: TOKEN_TTL_S });
   }
 
   return j({ error: "unknown_action" }, 400);

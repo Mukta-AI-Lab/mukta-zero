@@ -32,7 +32,8 @@ create table if not exists public.mz_conversations (
   title       text,
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now(),
-  project_id  uuid references public.mz_projects(id) on delete set null,
+  -- project_id (FK para mz_projects) é acrescentada por schema-projects.sql, que roda DEPOIS: declarar aqui fazia
+  -- as duas tabelas dependerem uma da outra e a instalação nova falhava (auditoria externa 7.2).
   pinned_at   timestamptz
 );
 

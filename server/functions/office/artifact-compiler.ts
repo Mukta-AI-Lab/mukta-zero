@@ -57,6 +57,10 @@ type Sql = any;
 type JsonRecord = Record<string, any>;
 
 import { buildChartSvg } from "./chart-svg.ts";
+// 💰 CUSTO DE PROVEDOR na plataforma Mukta (Herbert 2026-10-08) — visibilidade interna, tenant vazio; NÃO altera mz_charge_run.
+// Import ESTÁTICO: este arquivo só é deployado via bundle esbuild (deploy-mz-office.sh). Fire-and-forget, nunca lança.
+import { recordMzProviderCost } from "../_shared/record-llm-usage.mjs";
+
 
 // ===================== SERP (cliente HMAC do MZ — porte 1:1 de run-agent-chat / audit-integrity) =====================
 
@@ -130,8 +134,10 @@ async function llmContent(role: ResolvedRole, system: string, user: string, maxT
   for (let a = 1; a <= 2; a++) {
     const ac = new AbortController(); const tm = setTimeout(() => ac.abort(), timeoutMs);
     try {
+      const mzT0 = Date.now();
       const resp = await fetch(`${role.base_url.replace(/\/+$/, "")}/chat/completions`, { method: "POST", signal: ac.signal, headers: { "content-type": "application/json", authorization: `Bearer ${role.key}` }, body: JSON.stringify(payload) });
       const raw = await resp.text();
+      recordMzProviderCost({ module: "mz-office.artifact-compiler", provider: role.provider, baseUrl: role.base_url, modelId: role.model_slug, responseText: raw, ok: resp.ok, latencyMs: Date.now() - mzT0 });
       if (resp.ok) { try { const c = JSON.parse(raw)?.choices?.[0]?.message?.content || ""; if (c && c.trim()) return c; } catch { /* */ } }
     } catch { /* retry */ } finally { clearTimeout(tm); }
     if (a < 2) await new Promise((s) => setTimeout(s, 500));

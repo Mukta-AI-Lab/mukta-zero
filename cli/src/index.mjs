@@ -48,6 +48,7 @@ import { saveState, listStates, loadApprovedStates, approveState } from "./state
 import { pushChanges, openPr } from "./git-ops.mjs";
 import { setProvider, listProviders, removeProvider, getProvider } from "./providers.mjs";
 import { callDirect } from "./llm-direct.mjs";
+import { reportByokCall } from "./obs-report.mjs";
 import { loadTarget, setTarget, clearTarget, targetPath } from "./target.mjs";
 import { SUPABASE_URL, COMPANION_RUNTIME_BASE_URL, ACTIVE_TARGET_KIND, CLI_AUTH_URL, SUPABASE_PUBLISHABLE_KEY } from "./config.mjs";
 import { decomposeGoal, executePlan } from "./plan.mjs";
@@ -429,6 +430,7 @@ async function cmdAsk(args) {
       return;
     }
     const result = await callDirect(conf, { model: args.model || conf.default_model, system: assembleSystem(), user: prompt });
+    await reportByokCall({ provider: conf.name, model: result.model, latencyMs: result.latencyMs, usage: result.usage, ok: result.ok, status: result.status });
     if (!result.ok) {
       if (args.json) console.log(JSON.stringify({ ok: false, error: result.error || "erro desconhecido", status: result.status }, null, 2));
       console.error(`Request failed (HTTP ${result.status}): ${result.error || "erro desconhecido"}`);
